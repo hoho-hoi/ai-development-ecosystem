@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""A tiny ACP agent for tests (stdlib only).
+
+It answers initialize / session/new / session/prompt. The reply to a prompt
+is "echo: <body>", except for these bodies:
+    SLEEP <s>          wait s seconds, then reply
+    PERMISSION <kind>  ask session/request_permission for a tool of that kind,
+                       reply with the outcome as JSON
+    ENV                reply with JSON describing the environment it runs in
+    MCP                reply with the mcpServers it was given
+    BRIDGE <tool> <json>
+                       start the first MCP server it was given (the broker
+                       bridge), call that tool, reply with the tool result
+    CRASH              exit with code 3
+Every prompt is appended to a transcript under $CLAUDE_CONFIG_DIR (or
+$CODEX_HOME), standing in for the harness's own session records.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+state = {"mcp": None, "cwd": None, "next_id": 1000}
+
+
+def write(frame):
+    sys.stdout.write(json.dumps(frame) + "\n")
+    sys.stdout.flush()
+
+
+def read_frame():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line)
+
+
+def transcript(entry):
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CODEX_HOME")
+    if not base:
+        return
+    d = Path(base) / "projects"
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "transcript.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def body_of(text):
+    parts = text.split("\n\n")
+    return parts[1] if len(parts) > 1 else text
+
+
+def ask_permission(session_id, kind):
+    rid = state["next_id"]
+    state["next_id"] += 1
+    write(
+        {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": session_id,
+                "toolCall": {"toolCallId": "call_1", "title": f"do {kind}", "kind": kind},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }
+    )
+    while True:
+        f = read_frame()
+        if f.get("id") == rid and "method" not in f:
+            return f.get("result")
+
+
+def call_bridge(tool, args):
+    srv = state["mcp"][0]
+    env = os.environ.copy()
+    env.update({e["name"]: e["value"] for e in srv.get("env", [])})
+    p = subprocess.Popen(
+        [srv["command"], *srv["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True
+    )
+
+    def rpc(frame):
+        p.stdin.write(json.dumps(frame) + "\n")
+        p.stdin.flush()
+        if "id" in frame:
+            while True:
+                reply = json.loads(p.stdout.readline())
+                if reply.get("id") == frame["id"]:
+                    return reply
+
+    rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "0"}}})
+    rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    res = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": args}})
+    p.stdin.close()
+    p.wait(timeout=30)
+    return res.get("result")
+
+
+def handle_prompt(rid, params):
+    sid = params["sessionId"]
+    text = params["prompt"][0]["text"]
+    body = body_of(text)
+    transcript({"prompt": text})
+    if body.startswith("SLEEP "):
+        time.sleep(float(body.split()[1]))
+        reply = "echo: " + body
+    elif body.startswith("PERMISSION "):
+        reply = json.dumps(ask_permission(sid, body.split()[1]))
+    elif body == "ENV":
+        reply = json.dumps(
+            {
+                "home": os.environ.get("HOME"),
+                "uid": os.getuid(),
+                "cwd": os.getcwd(),
+                "files": sorted(str(p.relative_to(os.getcwd())) for p in Path.cwd().rglob("*") if ".git" not in p.parts),
+                "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+                "config_files": sorted(
+                    str(p.relative_to(os.environ["CLAUDE_CONFIG_DIR"]))
+                    for p in Path(os.environ.get("CLAUDE_CONFIG_DIR", "/nonexistent")).rglob("*")
+                ),
+                "model": os.environ.get("ANTHROPIC_MODEL"),
+                "secret": os.environ.get("HB_TEST_SECRET"),
+                "leaked_host_var": os.environ.get("HB_TEST_HOST_ONLY"),
+            }
+        )
+    elif body == "MCP":
+        reply = json.dumps(state["mcp"])
+    elif body.startswith("BRIDGE "):
+        _, tool, raw = body.split(" ", 2)
+        reply = json.dumps(call_bridge(tool, json.loads(raw)))
+    elif body == "CRASH":
+        sys.exit(3)
+    else:
+        reply = "echo: " + body
+    for chunk in (reply[: len(reply) // 2], reply[len(reply) // 2 :]):
+        write(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}},
+                },
+            }
+        )
+    transcript({"reply": reply})
+    write({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+
+
+def main():
+    while True:
+        f = read_frame()
+        method, rid, params = f.get("method"), f.get("id"), f.get("params") or {}
+        if method == "initialize":
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": False},
+                        "agentInfo": {"name": "fake-agent", "version": "0"},
+                        "authMethods": [],
+                    },
+                }
+            )
+        elif method == "session/new":
+            state["mcp"] = params.get("mcpServers")
+            state["cwd"] = params.get("cwd")
+            write({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1"}})
+        elif method == "session/prompt":
+            handle_prompt(rid, params)
+        elif method == "session/cancel":
+            pass
+        elif rid is not None:
+            write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "not found"}})
+
+
+if __name__ == "__main__":
+    main()

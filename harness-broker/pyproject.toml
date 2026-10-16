@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-broker"
+version = "0.1.0"
+description = "Spawn coding-agent sessions from profiles in isolated containers and let them talk over MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6",
+    "pydantic>=2.5",
+    "starlette>=0.37",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# Only the tests use the official MCP SDK, as an independent client for the bridge.
+test = ["mcp>=1.10"]
+
+[project.scripts]
+hb = "hbroker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

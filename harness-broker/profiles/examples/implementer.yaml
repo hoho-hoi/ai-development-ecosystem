@@ -1,0 +1,28 @@
+# Codex implementer, run through the codex-acp adapter.
+# Build the image with images/codex/Dockerfile and paste its digest below.
+id: implementer
+version: 1.0.0
+name: Implementer
+description: Implements a change in the workspace and may ask the reviewer profile for a review
+skills:
+  - id: implement-change
+    description: Make a focused code change and summarise the diff
+spawnableBy: [external]
+runtime:
+  harness: codex
+  adapter: codex-acp
+  model: your-codex-model-id  # replace with a pinned model id
+  image: harness-broker/codex@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  permissions:
+    mode: allow
+  # How Codex authenticates inside a fresh CODEX_HOME is not verified yet
+  # (see README, open items).
+  secrets: [OPENAI_API_KEY]
+workspace:
+  repo: https://github.com/example/app.git
+  ref: 0123456789abcdef0123456789abcdef01234567
+limits:
+  maxRuntimeMinutes: 60
+  # May spawn the reviewer, which itself may not spawn further.
+  maxSpawnDepth: 1
+  maxConcurrent: 2

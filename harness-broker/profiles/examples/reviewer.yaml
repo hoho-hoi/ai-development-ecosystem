@@ -1,0 +1,33 @@
+# Claude Code reviewer, run through the claude-agent-acp adapter.
+# Build the image with images/claude-code/Dockerfile and paste its digest below.
+id: reviewer
+version: 1.0.0
+name: Code reviewer
+description: Receives a diff or a question about the workspace and reports bugs and design problems
+skills:
+  - id: review-diff
+    description: Review a git diff and return findings ordered by severity
+spawnableBy: [external, implementer]
+runtime:
+  harness: claude-code
+  adapter: claude-agent-acp
+  model: claude-sonnet-5-5
+  image: harness-broker/claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  instructions: ./reviewer/instructions.md
+  bundledSkills: [./skills/review-checklist]
+  permissions:
+    mode: allow
+    allowKinds: [read, search, think, fetch]
+    allowedTools: [Read, Grep, Glob]
+  secrets: [CLAUDE_CODE_OAUTH_TOKEN]
+workspace:
+  repo: https://github.com/example/app.git
+  ref: 0123456789abcdef0123456789abcdef01234567
+network:
+  mode: bridge
+limits:
+  maxRuntimeMinutes: 30
+  maxSpawnDepth: 0
+  maxConcurrent: 2
+  memory: 4g
+  cpus: 2

@@ -1,0 +1,23 @@
+# harness-broker configuration. Copy to hb.yaml and run: hb daemon --config hb.yaml
+# Relative paths are relative to this file.
+
+profiles_dir: profiles
+# state_dir: ~/.local/state/harness-broker   # history, bundles and the broker key
+
+listen_host: 127.0.0.1
+listen_port: 8765
+
+# docker: one container per session (default).
+# local: plain child processes with NO isolation; for development only.
+runner: docker
+allow_local_runner: false
+
+docker:
+  binary: docker
+  network: hb-net        # created on first start; the broker also listens on its gateway
+
+# Global caps.
+max_sessions: 8          # live managed sessions
+max_spawn_depth: 2       # levels of spawning below the operator / an external session
+
+keep_bundles: false      # keep each session's prepared workspace after it ends
