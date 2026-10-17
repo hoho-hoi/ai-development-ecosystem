@@ -1,7 +1,10 @@
 """Profile schema and loading.
 
-A profile is an A2A Agent Card (id, name, description, version, skills) plus
-the fields needed to run it reproducibly: runtime, workspace, network, limits.
+A profile binds an agent definition to a runtime. The agent definition is a
+module (see modules.py) or, for small cases, instructions and skills given
+inline. The runtime part says how it runs reproducibly: harness, model,
+image, permissions, workspace, network and limits. The A2A Agent Card fields
+(id, name, description, version, skills) are what list_profiles returns.
 Relative paths inside a profile are resolved against the profile file.
 """
 
@@ -16,6 +19,8 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+
+from .modules import ModuleCache, check_relative, read_spec
 
 # Files and directories removed from every workspace, at any depth, unless the
 # profile overrides the list. These are where harnesses pick up project-level
@@ -61,9 +66,31 @@ class Permissions(_Model):
     mode: Literal["allow", "deny"] = "allow"
     # ACP tool kinds that are allowed when mode is "allow" (None = all kinds).
     allow_kinds: list[str] | None = Field(default=None, alias="allowKinds")
-    # Harness-native allow list, written into the harness settings
-    # (Claude Code: settings.json permissions.allow).
+    # Harness-native allow / deny lists, written into the harness settings
+    # (Claude Code: settings.json permissions.allow / permissions.deny).
     allowed_tools: list[str] = Field(default_factory=list, alias="allowedTools")
+    denied_tools: list[str] = Field(default_factory=list, alias="deniedTools")
+
+
+class ModuleRef(_Model):
+    """Where the module comes from: a git repo pinned to a commit, or a local
+    directory (development only; its files are fingerprinted at load)."""
+
+    repo: str | None = None
+    ref: str | None = None
+    local: str | None = None
+    path: str = "execution"
+
+    @model_validator(mode="after")
+    def _one_source(self) -> "ModuleRef":
+        if bool(self.repo) == bool(self.local):
+            raise ValueError("module needs exactly one of repo (+ ref) or local")
+        if self.repo and not (self.ref and COMMIT_RE.match(self.ref)):
+            raise ValueError("module.ref must be a full commit SHA when module.repo is set")
+        if self.local and self.ref:
+            raise ValueError("module.ref is only valid with module.repo")
+        check_relative(self.path, "module.path")
+        return self
 
 
 class Runtime(_Model):
@@ -71,6 +98,7 @@ class Runtime(_Model):
     adapter: list[str]
     model: str
     image: str
+    # Inline agent definition; not allowed together with a module.
     instructions: str | None = None
     bundled_skills: list[str] = Field(default_factory=list, alias="bundledSkills")
     mcp_servers: list[McpServer] = Field(default_factory=list, alias="mcpServers")
@@ -79,6 +107,15 @@ class Runtime(_Model):
     # environment (never their values in argv or history).
     secrets: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    # envelope: a message arrives with a header naming sender, message id and
+    #           thread, for agents that converse with several parties.
+    # body:     the message body is the prompt, verbatim.
+    message_format: Literal["envelope", "body"] = Field(default="envelope", alias="messageFormat")
+    # persistent:  one conversation for the whole session.
+    # per_message: every message starts a fresh conversation (same container).
+    session_mode: Literal["persistent", "per_message"] = Field(default="persistent", alias="sessionMode")
+    # Give the agent the broker's MCP tools (spawn, send, inbox, ...).
+    broker_tools: bool = Field(default=True, alias="brokerTools")
 
     @field_validator("adapter", mode="before")
     @classmethod
@@ -148,9 +185,11 @@ class Limits(_Model):
 class Profile(_Model):
     id: str
     version: str
-    name: str
-    description: str
+    # Default to the module's name / description when a module is given.
+    name: str | None = None
+    description: str | None = None
     skills: list[Skill] = Field(default_factory=list)
+    module: ModuleRef | None = None
     # Who may spawn this profile: "external", "*", or profile ids.
     spawnable_by: list[str] = Field(default_factory=lambda: ["external"], alias="spawnableBy")
     runtime: Runtime
@@ -160,6 +199,7 @@ class Profile(_Model):
 
     _source: Path | None = PrivateAttr(default=None)
     _fingerprint: str = PrivateAttr(default="")
+    _module_spec: Any = PrivateAttr(default=None)  # ModuleSpec when known without fetching
 
     @field_validator("id")
     @classmethod
@@ -167,6 +207,15 @@ class Profile(_Model):
         if not SLUG_RE.match(v):
             raise ValueError("id must be a lowercase slug (a-z, 0-9, -)")
         return v
+
+    @model_validator(mode="after")
+    def _definition(self) -> "Profile":
+        if self.module:
+            if self.runtime.instructions or self.runtime.bundled_skills:
+                raise ValueError("runtime.instructions / bundledSkills cannot be combined with module")
+        elif not (self.name and self.description):
+            raise ValueError("name and description are required when the profile has no module")
+        return self
 
     @property
     def source(self) -> Path | None:
@@ -190,15 +239,31 @@ class Profile(_Model):
     def skill_dirs(self) -> list[Path]:
         return [self.resolve(s) for s in self.runtime.bundled_skills]
 
+    @property
+    def display_name(self) -> str:
+        spec = self._module_spec
+        return self.name or (spec.name if spec else self.id)
+
+    @property
+    def display_description(self) -> str:
+        spec = self._module_spec
+        if self.description:
+            return self.description
+        if spec:
+            return spec.description
+        assert self.module is not None
+        return f"(module {self.module.repo}@{(self.module.ref or '')[:12]} not fetched yet)"
+
     def agent_card(self) -> dict[str, Any]:
         """The A2A Agent Card compatible part, as returned by list_profiles."""
         return {
             "id": self.id,
-            "name": self.name,
-            "description": self.description,
+            "name": self.display_name,
+            "description": self.display_description,
             "version": self.version,
             "skills": [s.model_dump() for s in self.skills],
             "harness": self.runtime.harness,
+            "module": self.module.model_dump(exclude_none=True) if self.module else None,
         }
 
     def resolved_dump(self) -> dict[str, Any]:
@@ -220,9 +285,22 @@ def _hash_tree(h: "hashlib._Hash", path: Path) -> None:
             h.update(child.read_bytes())
 
 
-def _finish(profile: Profile, source: Path | None) -> Profile:
+def _finish(profile: Profile, source: Path | None, cache: Any = None) -> Profile:
     profile._source = source
     h = hashlib.sha256(json.dumps(profile.model_dump(by_alias=True), sort_keys=True).encode())
+    if profile.module and profile.module.local:
+        # A local module can change under the profile, so its files are part
+        # of the fingerprint (a repo module is pinned by its commit).
+        mod = ModuleCache(Path("/nonexistent")).resolve(profile.module, source.parent if source else None)
+        profile._module_spec = mod.spec
+        h.update(json.dumps(mod.files, sort_keys=True).encode())
+    elif profile.module and cache is not None:
+        done = cache.cached(profile.module.repo, profile.module.ref)
+        if done:
+            try:
+                profile._module_spec = read_spec(done / profile.module.path)
+            except Exception:
+                pass
     if profile.runtime.instructions:
         p = profile.resolve(profile.runtime.instructions)
         if not p.is_file():
@@ -236,24 +314,25 @@ def _finish(profile: Profile, source: Path | None) -> Profile:
     return profile
 
 
-def load_profile(path: str | Path) -> Profile:
+def load_profile(path: str | Path, cache: Any = None) -> Profile:
     path = Path(path).resolve()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: a profile must be a mapping")
-    return _finish(Profile.model_validate(data), path)
+    return _finish(Profile.model_validate(data), path, cache)
 
 
-def profile_from_dict(data: dict[str, Any], source: Path | None = None) -> Profile:
-    return _finish(Profile.model_validate(data), source)
+def profile_from_dict(data: dict[str, Any], source: Path | None = None, cache: Any = None) -> Profile:
+    return _finish(Profile.model_validate(data), source, cache)
 
 
 class ProfileRegistry:
     """Profiles from a directory (*.yaml / *.yml), re-read on every lookup so
     edits take effect without restarting the broker."""
 
-    def __init__(self, directory: str | Path):
+    def __init__(self, directory: str | Path, cache: Any = None):
         self.directory = Path(directory)
+        self.cache = cache  # ModuleCache, to show names of already fetched modules
 
     def _load_all(self) -> tuple[dict[str, Profile], dict[str, str]]:
         profiles: dict[str, Profile] = {}
@@ -262,7 +341,7 @@ class ProfileRegistry:
             return profiles, errors
         for path in sorted([*self.directory.glob("*.yaml"), *self.directory.glob("*.yml")]):
             try:
-                p = load_profile(path)
+                p = load_profile(path, self.cache)
             except Exception as e:  # report, keep the rest usable
                 errors[path.name] = str(e)
                 continue

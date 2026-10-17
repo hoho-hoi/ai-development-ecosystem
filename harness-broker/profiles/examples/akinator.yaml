@@ -1,0 +1,25 @@
+# Akinator questioner, from the module in ysgrProgramming/akinator.
+# The module gives the role; this profile gives the runtime. Replace the image
+# with your build of images/claude-code (docker inspect --format '{{.Id}}').
+id: akinator
+version: 1.0.0
+module:
+  repo: https://github.com/ysgrProgramming/akinator.git
+  ref: 5bba33aa9fdf5d7c38208db279e33f456738fa00
+  path: execution
+spawnableBy: [external]
+runtime:
+  harness: claude-code
+  adapter: claude-agent-acp
+  model: claude-haiku-5-5
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  messageFormat: body        # the relayed answer is the whole prompt
+  brokerTools: false         # no spawn/send: it only talks to whoever relays
+  permissions:
+    mode: deny               # refuse every tool permission request
+    deniedTools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+  secrets: [ANTHROPIC_API_KEY]
+limits:
+  maxRuntimeMinutes: 60
+  maxSpawnDepth: 0
+  maxConcurrent: 4

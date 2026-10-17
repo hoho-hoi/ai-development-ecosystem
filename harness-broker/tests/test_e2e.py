@@ -188,6 +188,67 @@ class LifecycleTests(BrokerCase):
         self.assertTrue(b.get("duplicate"))
 
 
+class ModuleProfileTests(BrokerCase):
+    async def test_local_module_body_format_per_message(self):
+        st = await self.b.tool("spawn", profile="modlocal", wait=True)
+        self.assertEqual(st["state"], "idle", st)
+        sid = st["id"]
+
+        # body format: the prompt is exactly the message body
+        r = await self.b.tool("send", to=sid, body="RAW", wait=30)
+        self.assertFalse(r["timed_out"])
+        self.assertEqual(json.loads(r["reply"]["body"]), {"prompt": "RAW"})
+        self.assertEqual(r["reply"]["reply_to"], r["message_id"])
+
+        # the module's instructions and skills, and the denied tools, reach the harness
+        r = await self.b.tool("send", to=sid, body="INSTRUCTIONS", wait=30)
+        found = json.loads(r["reply"]["body"])
+        self.assertEqual(found["CLAUDE.md"], "You are the test module.\n")
+        self.assertEqual(found["skills"], ["mod-skill"])
+        self.assertEqual(found["settings"]["permissions"]["deny"], ["Bash", "WebSearch"])
+
+        # per_message: every message gets a fresh conversation; the old one is closed
+        r = await self.b.tool("send", to=sid, body="SESSION", wait=30)
+        info = json.loads(r["reply"]["body"])
+        self.assertEqual(info["prompts_in_session"], 1)
+        self.assertEqual(info["session"], "fake-session-3")  # 3rd message, 3rd conversation
+        self.assertEqual(info["closed"], ["fake-session-1", "fake-session-2"])
+
+        # brokerTools: false -> no MCP servers at all
+        r = await self.b.tool("send", to=sid, body="MCP", wait=30)
+        self.assertEqual(json.loads(r["reply"]["body"]), [])
+
+        # replies taken by send(wait) are not delivered again
+        self.assertEqual((await self.b.tool("inbox"))["messages"], [])
+
+        # module source and file hashes are in the history
+        mod = (await self.b.tool("history", session=sid, kinds=["session.module"]))["events"][0]["payload"]
+        self.assertEqual(mod["spec"]["id"], "mod")
+        self.assertIn("AGENTS.md", mod["files"])
+
+    async def test_repo_module_pinned_by_commit(self):
+        profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
+        self.assertEqual(profiles["modlocal"]["name"], "Test module")
+        self.assertIn("not fetched yet", profiles["modrepo"]["description"])
+        st = await self.b.tool("spawn", profile="modrepo", wait=True)
+        self.assertEqual(st["state"], "idle", st)
+        r = await self.b.tool("send", to=st["id"], body="INSTRUCTIONS", wait=30)
+        self.assertEqual(json.loads(r["reply"]["body"])["CLAUDE.md"], "You are the peer.\n")
+        mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
+        self.assertEqual(mod["source"]["path"], "requirements/peer")
+        self.assertEqual(len(mod["source"]["ref"]), 40)
+        profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
+        self.assertEqual(profiles["modrepo"]["name"], "Peer")  # cached now
+
+    async def test_send_wait_timeout_falls_back_to_inbox(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True)
+        r = await self.b.tool("send", to=st["id"], body="SLEEP 1.5", wait=0.3)
+        self.assertTrue(r["timed_out"])
+        self.assertIsNone(r["reply"])
+        late = await self.reply_to(r["message_id"])
+        self.assertEqual(late["body"], "echo: SLEEP 1.5")
+
+
 class PolicyTests(BrokerCase):
     async def register(self, name="ext"):
         code, body = await self.b.post("/api/register", {"name": name, "harness": "codex"})
@@ -251,7 +312,7 @@ class BridgeTests(BrokerCase):
                 )
                 res = await client.call_tool("list_profiles", {})
                 profiles = json.loads(res.content[0].text)["profiles"]
-                self.assertEqual(sorted(p["id"] for p in profiles), ["echo", "locked"])
+                self.assertEqual(sorted(p["id"] for p in profiles), ["echo", "locked", "modlocal", "modrepo"])
 
                 res = await client.call_tool("spawn", {"profile": "echo", "task": "via bridge"})
                 self.assertFalse(res.is_error, res.content)

@@ -21,6 +21,7 @@ from starlette.routing import Route
 
 from . import __version__
 from .config import BrokerConfig, ensure_broker_key
+from .modules import ModuleCache
 from .profiles import ProfileRegistry
 from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
@@ -35,7 +36,7 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_profiles": (set(), set()),
     "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout"}, {"profile"}),
-    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key", "auto_reply"}, {"to", "body"}),
+    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key", "auto_reply", "wait"}, {"to", "body"}),
     "inbox": ({"wait"}, set()),
     "list_sessions": ({"profile", "state", "include_ended"}, set()),
     "status": ({"session"}, {"session"}),
@@ -88,7 +89,7 @@ class Broker:
         self.cfg = cfg
         self.key = ensure_broker_key(cfg)
         self.store = HistoryStore(cfg.history_dir)
-        self.profiles = ProfileRegistry(cfg.profiles_dir)
+        self.profiles = ProfileRegistry(cfg.profiles_dir, ModuleCache(cfg.state_dir / "modules"))
         stale = self.store.mark_stale_sessions(LIVE)
         if stale:
             self.store.record("broker.stale_sessions", sessions=stale)
@@ -134,6 +135,7 @@ class Broker:
                 reply_to=args.get("reply_to"),
                 idempotency_key=args.get("idempotency_key"),
                 auto_reply=bool(args.get("auto_reply", True)),
+                wait=float(args.get("wait") or 0),
             )
         if tool == "inbox":
             return {"messages": await m.inbox(caller, wait=float(args.get("wait", 0)))}

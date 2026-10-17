@@ -37,9 +37,17 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 - **履歴の閲覧権限**：操作者はすべて読める。セッションが読めるのは、自分、自分が起動したセッション、自分が参加したスレッドだけ。
 - **待ち受け先**：docker ランナーでは、ブローカーは 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。
 
+## v0.2 で追加したこと（2026-10-17）
+
+- **モジュール**：`module.json` を持つ、ハーネスに依存しない定義を、プロファイルの `module`（`repo` + `ref` + `path`、または開発用の `local`）で参照できるようにした。コミットごとに `<state_dir>/modules/` へ一度だけ取得する。取得元とファイルのハッシュを `session.module` イベントに記録する。
+- **runtime の新しい項目**：`messageFormat`（`envelope` / `body`）、`sessionMode`（`persistent` / `per_message`）、`brokerTools`、`permissions.deniedTools`。
+- **`send` の `wait`**：返信を `send` の結果として受け取れる。受け取った返信は inbox やプロンプトとして二重に届かない。待ち時間を過ぎた返信は通常どおり届く。
+- **既存の試験用モジュールを移行**：akinator（branch `task/harness-broker`）と romaji-converter（同）。プロファイルの例は `profiles/examples/akinator*.yaml`、`romaji-converter.yaml`。偽の ACP エージェントで、ローカル参照とコミット固定の両方の通しの確認を済ませた。
+- 履歴のビューワーは、ユーザーから既存のビューワーを受け取ってから対応する。
+
 ## 次にやること（優先順）
 
-1. **実機での確認**：`images/claude-code/Dockerfile` をビルドし、`profiles/examples/reviewer.yaml` の image を書き換えて `hb call spawn` から応答まで通す。トークンは `CLAUDE_CODE_OAUTH_TOKEN` で渡す。あわせて `claude-agent-acp` の版と挙動を確認する。
+1. **実機での確認**：`images/claude-code/Dockerfile` をビルドし、`profiles/examples/romaji-converter.yaml` の image を書き換えて、romaji-converter の `evaluations/run_examples.py` を通す（安い）。次に akinator の `evaluations/run_case.py` を上限を小さくして通す。キーは `ANTHROPIC_API_KEY`（だめなら `CLAUDE_CODE_OAUTH_TOKEN`）。あわせて `claude-agent-acp` の版と挙動、`deniedTools` が効くかを確認する。
 2. **外部の Claude Code**：`hb mcp --channel` で、Channels 経由で受信できるか確認する。
 3. **Codex**：`codex-acp` イメージを確認し、新しい `CODEX_HOME` での認証の渡し方を決める。
 4. **リポジトリへの組み込み**：このリポジトリの `Makefile` と CI に harness-broker のテストを入れる。CONTRIBUTING により `make test` が必須。

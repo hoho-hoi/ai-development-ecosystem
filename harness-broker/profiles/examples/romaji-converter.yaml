@@ -1,0 +1,24 @@
+# Romaji -> Japanese converter, from ysgrProgramming/romaji-converter.
+id: romaji-converter
+version: 1.0.0
+module:
+  repo: https://github.com/ysgrProgramming/romaji-converter.git
+  ref: 8947b4734b54bff8a68b1d61489e8824d0c603e2
+  path: execution
+spawnableBy: [external, "*"]
+runtime:
+  harness: claude-code
+  adapter: claude-agent-acp
+  model: claude-haiku-5-5
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  messageFormat: body        # the text to convert is the whole prompt
+  sessionMode: per_message   # each conversion is independent
+  brokerTools: false
+  permissions:
+    mode: deny
+    deniedTools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+  secrets: [ANTHROPIC_API_KEY]
+limits:
+  maxRuntimeMinutes: 30
+  maxSpawnDepth: 0
+  maxConcurrent: 4

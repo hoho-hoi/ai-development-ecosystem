@@ -4,10 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import FAKE_DIGEST, ROOT, make_repo, write_profiles
+from helpers import FAKE_DIGEST, ROOT, make_module_repo, make_repo, write_profiles
 
 from hbroker.acp_client import decide_permission
-from hbroker.harness import prepare_harness_config
+from hbroker.harness import prepare_harness_config, resolve_definition
+from hbroker.modules import ModuleCache, load_local, read_spec
 from hbroker.profiles import DEFAULT_STRIP, Permissions, load_profile, profile_from_dict
 from hbroker.runner.docker import build_create_args, pack_bundle
 from hbroker.store import HistoryStore
@@ -110,7 +111,7 @@ class HarnessConfigTests(unittest.TestCase):
             repo, a, _ = make_repo(t)
             write_profiles(t / "profiles", repo, a)
             p = load_profile(t / "profiles" / "echo.yaml")
-            env = prepare_harness_config(p, t / "hb", "/home/agent/.hb")
+            env = prepare_harness_config(p, t / "hb", "/home/agent/.hb", p.instructions_text(), p.skill_dirs())
             self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/home/agent/.hb/claude")
             self.assertEqual(env["ANTHROPIC_MODEL"], "test-model-1")
             self.assertEqual((t / "hb/claude/CLAUDE.md").read_text(), "You are the echo profile.\n")
@@ -119,9 +120,89 @@ class HarnessConfigTests(unittest.TestCase):
     def test_codex_without_instructions_disables_agents_md(self):
         with tempfile.TemporaryDirectory() as t:
             p = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp"}))
-            env = prepare_harness_config(p, Path(t), "/rt")
+            env = prepare_harness_config(p, Path(t), "/rt", None, [])
             self.assertEqual(env["CODEX_HOME"], "/rt/codex")
             self.assertIn("project_doc_max_bytes = 0", (Path(t) / "codex/config.toml").read_text())
+
+
+class ModuleTests(unittest.TestCase):
+    def test_module_ref_validation(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            profile_from_dict(minimal(module={"path": "execution"}))
+        with self.assertRaisesRegex(ValueError, "full commit SHA"):
+            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "main"}))
+        with self.assertRaisesRegex(ValueError, "relative path"):
+            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40, "path": "../x"}))
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40},
+                                      runtime={"instructions": "./x.md"}))
+        with self.assertRaisesRegex(ValueError, "name and description"):
+            data = minimal()
+            del data["name"]
+            profile_from_dict(data)
+
+    def test_local_module_names_and_fingerprint(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            mrepo, _ = make_module_repo(t)
+            data = minimal(module={"local": str(mrepo)})
+            del data["name"], data["description"]
+            p = profile_from_dict(data)
+            self.assertEqual(p.agent_card()["name"], "Test module")
+            self.assertEqual(p.agent_card()["description"], "a module for tests")
+            before = p.fingerprint
+            (mrepo / "execution" / "AGENTS.md").write_text("changed\n")
+            self.assertNotEqual(before, profile_from_dict(data).fingerprint)
+
+    def test_repo_module_fetch_and_definition(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            mrepo, commit = make_module_repo(t)
+            cache = ModuleCache(t / "cache")
+            bare = minimal(module={"repo": str(mrepo), "ref": commit})
+            del bare["description"]
+            self.assertIn("not fetched yet", profile_from_dict(bare, cache=cache).agent_card()["description"])
+            p = profile_from_dict(minimal(module={"repo": str(mrepo), "ref": commit}), cache=cache)
+            instructions, skills, manifest = resolve_definition(p, cache)
+            self.assertEqual(instructions, "You are the test module.\n")
+            self.assertEqual([d.name for d in skills], ["mod-skill"])
+            self.assertEqual(manifest["source"]["ref"], commit)
+            self.assertIn("AGENTS.md", manifest["files"])
+            self.assertNotIn("../requirements/purpose.md", manifest["files"])
+            # cached now: the registry shows the module's own name
+            p2 = profile_from_dict(minimal(module={"repo": str(mrepo), "ref": commit}), cache=cache)
+            self.assertEqual(p2.agent_card()["description"], "d")  # profile description wins
+            data = minimal(module={"repo": str(mrepo), "ref": commit})
+            del data["description"]
+            self.assertEqual(profile_from_dict(data, cache=cache).agent_card()["description"], "a module for tests")
+
+    def test_module_instructions_cannot_escape(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "m").mkdir()
+            (t / "m" / "module.json").write_text(json.dumps(
+                {"schemaVersion": 1, "id": "m", "name": "m", "instructions": "../secret.md"}))
+            with self.assertRaises(ValueError):
+                read_spec(t / "m")
+
+    def test_skill_symlink_cannot_escape(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "secret").mkdir()
+            (t / "secret" / "key").write_text("s3cret")
+            m = t / "m"
+            (m / "skills").mkdir(parents=True)
+            (m / "module.json").write_text(json.dumps({"schemaVersion": 1, "id": "m", "name": "m"}))
+            (m / "skills" / "evil").symlink_to(t / "secret")
+            with self.assertRaisesRegex(ValueError, "outside the module"):
+                load_local(m, {"local": str(m)})
+
+    def test_denied_tools_in_claude_settings(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = profile_from_dict(minimal(runtime={"permissions": {"deniedTools": ["Bash", "WebFetch"]}}))
+            prepare_harness_config(p, Path(t), "/rt", "hi", [])
+            settings = json.loads((Path(t) / "claude/settings.json").read_text())
+            self.assertEqual(settings["permissions"]["deny"], ["Bash", "WebFetch"])
 
 
 class DockerArgsTests(unittest.TestCase):

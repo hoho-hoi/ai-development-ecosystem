@@ -12,24 +12,32 @@ import json
 import shutil
 from pathlib import Path
 
+from .modules import ModuleCache
 from .profiles import Profile
 
 
-def _copy_skills(profile: Profile, dest: Path) -> list[str]:
+def _copy_skills(skill_dirs: list[Path], dest: Path) -> list[str]:
     names = []
-    for src in profile.skill_dirs():
+    for src in skill_dirs:
         if not (src / "SKILL.md").is_file():
             raise ValueError(f"bundled skill {src} has no SKILL.md")
-        shutil.copytree(src, dest / src.name)
+        # Keep symlinks as links: following them could copy host files into the session.
+        shutil.copytree(src, dest / src.name, symlinks=True)
         names.append(src.name)
     return names
 
 
-def prepare_harness_config(profile: Profile, host_dir: Path, runtime_dir: str) -> dict[str, str]:
+def prepare_harness_config(
+    profile: Profile,
+    host_dir: Path,
+    runtime_dir: str,
+    instructions: str | None,
+    skill_dirs: list[Path],
+) -> dict[str, str]:
     """Write the harness config under host_dir and return the env vars that
-    point the harness at it."""
+    point the harness at it. `instructions` and `skill_dirs` come from the
+    profile's module (or its inline definition)."""
     rt = profile.runtime
-    instructions = profile.instructions_text()
     env: dict[str, str] = {"HB_MODEL": rt.model}
 
     if rt.harness == "claude-code":
@@ -37,10 +45,15 @@ def prepare_harness_config(profile: Profile, host_dir: Path, runtime_dir: str) -
         (d / "skills").mkdir(parents=True)
         if instructions is not None:
             (d / "CLAUDE.md").write_text(instructions, encoding="utf-8")
-        _copy_skills(profile, d / "skills")
+        _copy_skills(skill_dirs, d / "skills")
         settings: dict[str, object] = {}
+        perms: dict[str, list[str]] = {}
         if rt.permissions.allowed_tools:
-            settings["permissions"] = {"allow": rt.permissions.allowed_tools}
+            perms["allow"] = rt.permissions.allowed_tools
+        if rt.permissions.denied_tools:
+            perms["deny"] = rt.permissions.denied_tools
+        if perms:
+            settings["permissions"] = perms
         (d / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
         env.update(
             {
@@ -58,7 +71,7 @@ def prepare_harness_config(profile: Profile, host_dir: Path, runtime_dir: str) -
         else:
             # No profile instructions: make sure no AGENTS.md is read at all.
             lines.append("project_doc_max_bytes = 0")
-        _copy_skills(profile, d / "skills")
+        _copy_skills(skill_dirs, d / "skills")
         (d / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         env["CODEX_HOME"] = f"{runtime_dir}/codex"
     else:
@@ -68,11 +81,20 @@ def prepare_harness_config(profile: Profile, host_dir: Path, runtime_dir: str) -
         if instructions is not None:
             (d / "INSTRUCTIONS.md").write_text(instructions, encoding="utf-8")
             env["HB_INSTRUCTIONS_FILE"] = f"{runtime_dir}/{rt.harness}/INSTRUCTIONS.md"
-        _copy_skills(profile, d / "skills")
+        _copy_skills(skill_dirs, d / "skills")
         env["HB_SKILLS_DIR"] = f"{runtime_dir}/{rt.harness}/skills"
 
     env.update(rt.env)
     return env
+
+
+def resolve_definition(profile: Profile, cache: "ModuleCache") -> tuple[str | None, list[Path], dict | None]:
+    """(instructions, skill dirs, module manifest) for a profile."""
+    if profile.module:
+        base = profile.source.parent if profile.source else None
+        mod = cache.resolve(profile.module, base)
+        return mod.instructions_text(), mod.skill_dirs(), mod.manifest()
+    return profile.instructions_text(), profile.skill_dirs(), None
 
 
 def harness_record_dir(profile: Profile) -> str:

@@ -23,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-state = {"mcp": None, "cwd": None, "next_id": 1000}
+state = {"mcp": None, "cwd": None, "next_id": 1000, "sessions": 0, "prompts": {}, "closed": []}
 
 
 def write(frame):
@@ -49,8 +49,11 @@ def transcript(entry):
 
 
 def body_of(text):
-    parts = text.split("\n\n")
-    return parts[1] if len(parts) > 1 else text
+    # envelope format: header lines, blank line, body, blank line, footer
+    if text.startswith("[harness-broker] message from"):
+        parts = text.split("\n\n")
+        return parts[1] if len(parts) > 1 else text
+    return text
 
 
 def ask_permission(session_id, kind):
@@ -106,6 +109,7 @@ def call_bridge(tool, args):
 def handle_prompt(rid, params):
     sid = params["sessionId"]
     text = params["prompt"][0]["text"]
+    state["prompts"][sid] = state["prompts"].get(sid, 0) + 1
     body = body_of(text)
     transcript({"prompt": text})
     if body.startswith("SLEEP "):
@@ -130,6 +134,21 @@ def handle_prompt(rid, params):
                 "leaked_host_var": os.environ.get("HB_TEST_HOST_ONLY"),
             }
         )
+    elif body == "RAW":
+        reply = json.dumps({"prompt": text})
+    elif body == "SESSION":
+        reply = json.dumps({"session": sid, "prompts_in_session": state["prompts"].get(sid, 0), "closed": state["closed"]})
+    elif body == "INSTRUCTIONS":
+        base = os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CODEX_HOME") or ""
+        found = {}
+        for name in ("CLAUDE.md", "AGENTS.md"):
+            f = Path(base) / name
+            if f.is_file():
+                found[name] = f.read_text()
+        found["skills"] = sorted(p.name for p in (Path(base) / "skills").glob("*")) if base else []
+        settings = Path(base) / "settings.json"
+        found["settings"] = json.loads(settings.read_text()) if settings.is_file() else None
+        reply = json.dumps(found)
     elif body == "MCP":
         reply = json.dumps(state["mcp"])
     elif body.startswith("BRIDGE "):
@@ -165,7 +184,7 @@ def main():
                     "id": rid,
                     "result": {
                         "protocolVersion": 1,
-                        "agentCapabilities": {"loadSession": False},
+                        "agentCapabilities": {"loadSession": False, "sessionCapabilities": {"close": {}}},
                         "agentInfo": {"name": "fake-agent", "version": "0"},
                         "authMethods": [],
                     },
@@ -174,7 +193,11 @@ def main():
         elif method == "session/new":
             state["mcp"] = params.get("mcpServers")
             state["cwd"] = params.get("cwd")
-            write({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1"}})
+            state["sessions"] += 1
+            write({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": f"fake-session-{state['sessions']}"}})
+        elif method == "session/close":
+            state["closed"].append(params.get("sessionId"))
+            write({"jsonrpc": "2.0", "id": rid, "result": {}})
         elif method == "session/prompt":
             handle_prompt(rid, params)
         elif method == "session/cancel":

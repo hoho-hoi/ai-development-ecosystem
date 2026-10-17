@@ -3,11 +3,11 @@
 プロファイルからコーディングエージェント（Claude Code、Codex など）のセッションを隔離コンテナで起動し、セッション同士を MCP 経由で送受信させるブローカーです。
 
 - **ハーネスの抽象化**：管理下セッションは ACP（Agent Client Protocol）で操作するので、ハーネスの違いはアダプタが吸収します。
-- **プロファイル**：A2A の Agent Card に実行環境（イメージ、モデル、指示、skill、権限、ワークスペース）を足した YAML です。
+- **モジュールとプロファイル**：モジュールはエージェントの役割（指示と skill）だけを持つ、ハーネスに依存しない定義です。プロファイルはそれを実行環境（ハーネス、モデル、イメージ、権限、ワークスペース）に結びつける YAML で、A2A の Agent Card の項目も持ちます。
 - **再現性**：イメージは digest、ワークスペースはコミット SHA で固定します。CLAUDE.md・AGENTS.md・`.claude/` などプロジェクト側の設定は全階層から除去し、ホストの `~/.claude` や `~/.codex` も読ませません。
 - **実行履歴**：送信原文、セッションに実際に投入した文面、ACP の生のやりとりまで、追記専用で記録します。
 
-状態は v0.1（最小構成）です。末尾の「未実装・未確認」も読んでください。
+状態は v0.2 です。末尾の「未実装・未確認」も読んでください。
 
 ## 構成
 
@@ -49,24 +49,52 @@ docker ランナーでは、ブローカーは `127.0.0.1` に加えてセッシ
 認証情報は、プロファイルの `runtime.secrets` に**環境変数名だけ**を書きます。ブローカーを起動したシェルの環境から値を取り、`docker create --env NAME` で渡します。値は argv にも履歴にも残りません。
 
 ```sh
-export CLAUDE_CODE_OAUTH_TOKEN=...   # claude-agent-acp は OAuth トークンを使う
+export ANTHROPIC_API_KEY=...          # プロファイルの secrets に書いた名前
 hb daemon --config hb.yaml
 ```
 
+claude-agent-acp が `ANTHROPIC_API_KEY` をそのまま使えるかは実機で未確認です。使えなければ `CLAUDE_CODE_OAUTH_TOKEN` で渡します。
+
+## モジュール
+
+モジュールは `module.json` を持つディレクトリです。
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "akinator",
+  "name": "アキネーター（質問役）",
+  "description": "呼び出す側が読む用途の説明",
+  "instructions": "AGENTS.md"
+}
+```
+
+- `instructions` のファイルがハーネスの指示（Claude Code なら `CLAUDE.md`、Codex なら `AGENTS.md`）として配置されます。
+- `skills/<name>/SKILL.md` があれば skill として配置されます（`skills` で場所を変更可）。
+- モジュールのディレクトリの外のファイル（requirements、evaluations など）はエージェントに渡りません。
+- ハーネスやモデルの設定はモジュールに置きません。それはプロファイルの役目です。
+
+実例：[ysgrProgramming/akinator](https://github.com/ysgrProgramming/akinator)（`execution/` と `requirements/answerer/`）、[ysgrProgramming/romaji-converter](https://github.com/ysgrProgramming/romaji-converter)（`execution/`）。
+
 ## プロファイル
 
-例：[profiles/examples/reviewer.yaml](profiles/examples/reviewer.yaml)、[profiles/examples/implementer.yaml](profiles/examples/implementer.yaml)
+例：[akinator.yaml](profiles/examples/akinator.yaml)、[akinator-answerer.yaml](profiles/examples/akinator-answerer.yaml)、[romaji-converter.yaml](profiles/examples/romaji-converter.yaml)（モジュールを使う例）、[reviewer.yaml](profiles/examples/reviewer.yaml)、[implementer.yaml](profiles/examples/implementer.yaml)（指示をプロファイルに直接書く例）
 
 | フィールド | 内容 |
 | --- | --- |
-| `id` / `version` / `name` / `description` / `skills` | Agent Card 互換。`list_profiles` で返す |
+| `id` / `version` / `name` / `description` / `skills` | Agent Card 互換。`list_profiles` で返す。モジュールを使う場合、`name` と `description` は省略するとモジュールのものになる |
+| `module.repo` / `ref` / `path` | モジュールのリポジトリ、コミット SHA（ブランチ名は拒否）、リポジトリ内のディレクトリ（既定 `execution`）。コミットごとに一度だけ取得してキャッシュする |
+| `module.local` / `path` | 開発用。手元のディレクトリを使う。中身のハッシュが fingerprint に入る |
 | `spawnableBy` | 起動を許す相手。`external`、`*`、またはプロファイル id |
 | `runtime.harness` | `claude-code` / `codex` / `gemini` / `custom` |
 | `runtime.adapter` | コンテナ内で起動する ACP アダプタのコマンド |
 | `runtime.model` | モデル ID（固定値） |
 | `runtime.image` | `sha256:<image id>` または `<name>@sha256:<digest>`。タグは拒否 |
-| `runtime.instructions` / `bundledSkills` | ハーネス専用の設定ディレクトリ（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）に配置 |
-| `runtime.permissions` | ACP の権限要求への答え方（`mode`、`allowKinds`）と、ハーネス側の許可リスト（`allowedTools`） |
+| `runtime.instructions` / `bundledSkills` | モジュールを使わない場合の指示と skill。`module` とは併用できない |
+| `runtime.messageFormat` | `envelope`（既定。送信元・メッセージID・スレッドの見出しを付ける）か `body`（本文だけをそのまま渡す） |
+| `runtime.sessionMode` | `persistent`（既定。1つの会話を続ける）か `per_message`（メッセージごとに新しい会話。コンテナは同じ） |
+| `runtime.brokerTools` | ブローカーのツール（spawn、send など）を持たせるか。既定 `true` |
+| `runtime.permissions` | ACP の権限要求への答え方（`mode`、`allowKinds`）と、ハーネス側の許可・拒否リスト（`allowedTools`、`deniedTools`） |
 | `runtime.secrets` / `env` | 渡す秘密情報の環境変数名 / 秘密でない環境変数 |
 | `workspace.repo` / `ref` | clone するリポジトリとコミット SHA（ブランチ名は拒否） |
 | `workspace.strip` / `stripExtra` | 除去するファイル名のパターン（既定値は下記）/ その追加分 |
@@ -102,7 +130,7 @@ codex mcp add hb -- hb mcp --harness codex
 | --- | --- |
 | `list_profiles` | プロファイル一覧（Agent Card 相当） |
 | `spawn` | プロファイルからセッションを起動。`task` を渡すと最初のメッセージになり、返事は自分宛てに届く |
-| `send` | セッション（id か名前）へ送信。管理下セッションの最終応答は、自動で送信元に返る |
+| `send` | セッション（id か名前）へ送信。管理下セッションの最終応答は、自動で送信元に返る。`wait` 秒を指定すると、その返信を `send` の結果として受け取る |
 | `inbox` | 未読メッセージを受け取る。`wait` 秒まで待てる |
 | `list_sessions` / `status` | 一覧と状態（直近の応答、経過時間、使用量） |
 | `terminate` | 自分が起動したセッション（または自分）を終了。記録を回収してからコンテナを破棄 |
@@ -156,4 +184,6 @@ HB_TEST_DOCKER_IMAGE=$(docker inspect --format '{{.Id}}' hb-test-agent) python3 
 - **起動後の設定検証**：読み込まれた指示ファイルが想定どおりかを、起動直後に確かめる仕組みはまだありません。
 - **履歴**：保持期間の設定と、宣言外の秘密情報のマスキングはありません。
 - **単一ホストのみ**です。
+- **費用の上限**：トークンや費用の上限はまだありません。制限できるのは実行時間と同時起動数だけです。
+- **ツールの無効化**：`deniedTools` は Claude Code の `settings.json` にだけ書き込みます。Codex のツール制限は未対応です。
 - 当初は TypeScript を想定していましたが、開発環境の都合で Python で実装しました。MCP ブリッジは、Claude Code Channels の通知を任意のタイミングで送るために自前で実装し、公式 MCP SDK のクライアントで動作を確認しています。

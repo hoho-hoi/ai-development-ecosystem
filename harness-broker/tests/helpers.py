@@ -63,7 +63,35 @@ def make_repo(root: Path) -> tuple[Path, str, str]:
     return repo, commit_a, commit_b
 
 
-def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST, adapter: list[str] | None = None) -> None:
+def make_module_repo(root: Path) -> tuple[Path, str]:
+    """A module repository: execution/ is the module, plus a second module
+    under requirements/peer. Returns (repo, commit)."""
+    repo = root / "module-repo"
+    files = {
+        "execution/module.json": json.dumps(
+            {"schemaVersion": 1, "id": "mod", "name": "Test module", "description": "a module for tests",
+             "instructions": "AGENTS.md"}
+        ),
+        "execution/AGENTS.md": "You are the test module.\n",
+        "execution/skills/mod-skill/SKILL.md": "---\nname: mod-skill\ndescription: test\n---\n",
+        "requirements/peer/module.json": json.dumps(
+            {"schemaVersion": 1, "id": "peer", "name": "Peer", "description": "peer module", "instructions": "AGENTS.md"}
+        ),
+        "requirements/peer/AGENTS.md": "You are the peer.\n",
+        "requirements/purpose.md": "never given to the agent\n",
+    }
+    for rel, text in files.items():
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+    git(repo.parent, "init", "-q", "-b", "main", str(repo))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "module")
+    return repo, git(repo, "rev-parse", "HEAD")
+
+
+def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST, adapter: list[str] | None = None,
+                   module_repo: tuple[Path, str] | None = None) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "echo-instructions.md").write_text("You are the echo profile.\n")
     skill = pdir / "skills" / "echo-skill"
@@ -90,6 +118,22 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
         "echo": {**base, "id": "echo", "name": "Echo", "spawnableBy": ["external", "echo"]},
         "locked": {**base, "id": "locked", "name": "Locked", "spawnableBy": ["reviewer"]},
     }
+    if module_repo:
+        mrepo, mcommit = module_repo
+        rt = {k: v for k, v in base["runtime"].items() if k not in ("instructions", "bundledSkills")}
+        profiles["modlocal"] = {
+            "id": "modlocal", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "execution"},
+            "runtime": {**rt, "messageFormat": "body", "sessionMode": "per_message", "brokerTools": False,
+                        "permissions": {"mode": "deny", "deniedTools": ["Bash", "WebSearch"]}},
+            "limits": base["limits"],
+        }
+        profiles["modrepo"] = {
+            "id": "modrepo", "version": "1.0.0",
+            "module": {"repo": str(mrepo), "ref": mcommit, "path": "requirements/peer"},
+            "runtime": {**rt, "messageFormat": "body"},
+            "limits": base["limits"],
+        }
     for pid, data in profiles.items():
         (pdir / f"{pid}.yaml").write_text(json.dumps(data))  # JSON is valid YAML
 
@@ -98,11 +142,12 @@ class RunningBroker:
     """Broker + uvicorn on a free port inside the test's event loop."""
 
     def __init__(self, tmp: Path, repo: Path, commit: str, docker_image: str | None = None):
+        module_repo = make_module_repo(tmp)
         if docker_image:
             write_profiles(tmp / "profiles", repo, commit, image=docker_image,
-                           adapter=["python3", "/opt/hb/fake_acp_agent.py"])
+                           adapter=["python3", "/opt/hb/fake_acp_agent.py"], module_repo=module_repo)
         else:
-            write_profiles(tmp / "profiles", repo, commit)
+            write_profiles(tmp / "profiles", repo, commit, module_repo=module_repo)
         self.cfg = BrokerConfig(
             state_dir=tmp / "state",
             profiles_dir=tmp / "profiles",

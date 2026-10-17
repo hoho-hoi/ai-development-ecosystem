@@ -28,7 +28,8 @@ from typing import Any
 
 from .acp_client import AcpClient
 from .config import BrokerConfig
-from .harness import harness_record_dir, prepare_harness_config
+from .harness import harness_record_dir, prepare_harness_config, resolve_definition
+from .modules import ModuleCache
 from .jsonrpc import ConnectionClosed, RpcError
 from .profiles import Profile, ProfileRegistry
 from .runner import RunHandle, Runner
@@ -94,10 +95,12 @@ class Session:
     acp: AcpClient | None = None
     acp_session_id: str | None = None
     queue: asyncio.Queue[Message | None] | None = None
+    mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     finalized: asyncio.Event = field(default_factory=asyncio.Event)
     last_reply: str | None = None
+    turns: int = 0
     usage: dict[str, Any] | None = None
     current: Message | None = None  # message whose turn is running
     # external / operator
@@ -171,6 +174,9 @@ class SessionManager:
         self.sessions: dict[str, Session] = {}
         self._by_token: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self.modules = ModuleCache(cfg.state_dir / "modules")
+        # message id -> future resolved with the reply, for send(wait=...)
+        self._waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self.operator = self._add(
             Session(
                 id=OPERATOR,
@@ -329,7 +335,12 @@ class SessionManager:
             self.store.record("session.workspace", session_id=s.id, **manifest)
             ws_path, hb_path = self.runner.runtime_paths(bundle)
             (bundle / "hb").mkdir()
-            env = prepare_harness_config(profile, bundle / "hb", hb_path)
+            instructions, skill_dirs, module_manifest = await asyncio.to_thread(
+                resolve_definition, profile, self.modules
+            )
+            if module_manifest:
+                self.store.record("session.module", session_id=s.id, **module_manifest)
+            env = prepare_harness_config(profile, bundle / "hb", hb_path, instructions, skill_dirs)
             self.store.record("session.harness_env", session_id=s.id, env=env, secrets=profile.runtime.secrets)
             for name in profile.runtime.secrets:
                 if name in os.environ:
@@ -361,19 +372,22 @@ class SessionManager:
                 on_permission=on_permission,
             )
             await s.acp.initialize()
-            mcp_servers = [
-                {
-                    "name": "hb",
-                    "command": s.handle.bridge_command[0],
-                    "args": s.handle.bridge_command[1:],
-                    "env": [
-                        {"name": "HB_BROKER_URL", "value": s.handle.broker_url},
-                        {"name": "HB_TOKEN", "value": s.token},
-                        # Managed sessions receive messages as prompts, not via inbox.
-                        {"name": "HB_PIGGYBACK", "value": "0"},
-                    ],
-                }
-            ] + [
+            mcp_servers: list[dict[str, Any]] = []
+            if profile.runtime.broker_tools:
+                mcp_servers.append(
+                    {
+                        "name": "hb",
+                        "command": s.handle.bridge_command[0],
+                        "args": s.handle.bridge_command[1:],
+                        "env": [
+                            {"name": "HB_BROKER_URL", "value": s.handle.broker_url},
+                            {"name": "HB_TOKEN", "value": s.token},
+                            # Managed sessions receive messages as prompts, not via inbox.
+                            {"name": "HB_PIGGYBACK", "value": "0"},
+                        ],
+                    }
+                )
+            mcp_servers += [
                 {
                     "name": m.name,
                     "command": m.command,
@@ -382,6 +396,7 @@ class SessionManager:
                 }
                 for m in profile.runtime.mcp_servers
             ]
+            s.mcp_servers = mcp_servers
             s.acp_session_id = await s.acp.new_session(s.handle.workspace_path, mcp_servers)
             if s.state != "starting":
                 return
@@ -392,6 +407,20 @@ class SessionManager:
             log.exception("launch of %s failed", s.id)
             self.store.record("session.error", session_id=s.id, stage="launch", error=repr(e))
             await self._finalize(s, "failed", f"launch failed: {e}")
+
+    async def _fresh_conversation(self, s: Session) -> None:
+        """per_message mode: close the previous ACP session when the agent
+        supports it, then open a new one in the same process."""
+        assert s.acp is not None and s.handle is not None
+        old = s.acp_session_id
+        caps = (s.acp.agent_info.get("agentCapabilities") or {}).get("sessionCapabilities") or {}
+        if old and caps.get("close") is not None:
+            try:
+                await s.acp.peer.request("session/close", {"sessionId": old}, timeout=10)
+            except Exception as e:
+                self.store.record("session.error", session_id=s.id, stage="session_close", error=repr(e))
+        s.acp_session_id = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers)
+        self.store.record("session.conversation", session_id=s.id, acp_session_id=s.acp_session_id, previous=old)
 
     async def _watch_process(self, s: Session) -> None:
         assert s.handle is not None
@@ -412,7 +441,9 @@ class SessionManager:
             if msg is None or not s.live:
                 return
             sender = self.sessions.get(msg.from_id)
-            text = format_injection(msg, sender)
+            assert s.profile is not None
+            rt = s.profile.runtime
+            text = msg.body if rt.message_format == "body" else format_injection(msg, sender)
             self._set_state(s, "busy", message_id=msg.id)
             self.store.mark_delivered(msg.id)
             self.store.record(
@@ -425,6 +456,9 @@ class SessionManager:
             )
             s.current = msg
             try:
+                if rt.session_mode == "per_message" and s.turns > 0:
+                    await self._fresh_conversation(s)
+                s.turns += 1
                 stop_reason, reply = await s.acp.prompt(s.acp_session_id, text)
             except (ConnectionClosed, RpcError) as e:
                 self.store.record("session.error", session_id=s.id, stage="prompt", error=repr(e))
@@ -460,13 +494,34 @@ class SessionManager:
         reply_to: str | None = None,
         idempotency_key: str | None = None,
         auto_reply: bool = True,
+        wait: float = 0,
     ) -> dict[str, Any]:
+        """Post a message. With wait > 0 (and auto_reply), block up to `wait`
+        seconds for the target's reply and return it; the reply is then not
+        delivered again through the inbox or as a prompt."""
         target = self.resolve(to)
         if idempotency_key:
             existing = self.store.find_idempotent(caller.id, idempotency_key)
             if existing:
                 return {"message_id": existing["id"], "thread_id": existing["thread_id"], "duplicate": True}
-        return await self._post(caller, target, body, thread_id, reply_to, idempotency_key, auto_reply)
+        wait = max(0.0, min(float(wait or 0), 3600.0))
+        if not wait or not auto_reply or target.kind != "managed":
+            return await self._post(caller, target, body, thread_id, reply_to, idempotency_key, auto_reply)
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        result = await self._post(
+            caller, target, body, thread_id, reply_to, idempotency_key, auto_reply, waiter=fut
+        )
+        try:
+            result["reply"] = await asyncio.wait_for(asyncio.shield(fut), wait)
+            result["timed_out"] = False
+        except asyncio.TimeoutError:
+            self._waiters.pop(result["message_id"], None)
+            if fut.done():  # resolved right at the deadline
+                result["reply"], result["timed_out"] = fut.result(), False
+            else:
+                fut.cancel()
+                result["reply"], result["timed_out"] = None, True
+        return result
 
     async def _post(
         self,
@@ -478,6 +533,7 @@ class SessionManager:
         idempotency_key: str | None,
         auto_reply: bool,
         auto: bool = False,
+        waiter: asyncio.Future[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not thread_id and reply_to:
             original = self.store.message(reply_to)
@@ -524,8 +580,26 @@ class SessionManager:
             auto_reply=msg.auto_reply,
             automatic=auto,
         )
+        if waiter is not None:
+            self._waiters[msg.id] = waiter
         queued_ahead = None
-        if target.kind == "managed":
+        pending = self._waiters.pop(reply_to, None) if (auto and reply_to) else None
+        if pending is not None and not pending.done():
+            # The sender is blocked in send(wait=...): hand the reply over directly.
+            self.store.mark_delivered(msg.id)
+            self.store.record("message.deliver", session_id=target.id, thread_id=thread_id, message_id=msg.id, via="wait")
+            pending.set_result(
+                {
+                    "message_id": msg.id,
+                    "from": sender.id,
+                    "from_name": sender.name,
+                    "thread_id": thread_id,
+                    "reply_to": reply_to,
+                    "body": body,
+                    "sent_at": msg.ts,
+                }
+            )
+        elif target.kind == "managed":
             assert target.queue is not None
             queued_ahead = target.queue.qsize() + (1 if target.state == "busy" else 0)
             await target.queue.put(msg)
