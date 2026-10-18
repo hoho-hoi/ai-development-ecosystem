@@ -27,6 +27,9 @@ def _copy_skills(skill_dirs: list[Path], dest: Path) -> list[str]:
     return names
 
 
+BRIDGE_SERVER = "hb"  # MCP server name of the broker bridge in every session
+
+
 def prepare_harness_config(
     profile: Profile,
     host_dir: Path,
@@ -48,8 +51,11 @@ def prepare_harness_config(
         _copy_skills(skill_dirs, d / "skills")
         settings: dict[str, object] = {}
         perms: dict[str, list[str]] = {}
-        if rt.permissions.allowed_tools:
-            perms["allow"] = rt.permissions.allowed_tools
+        # The broker tools the profile grants are allowed outright: they are
+        # how the agent talks, so a "deny" profile must not block them.
+        allow = list(rt.permissions.allowed_tools) + [f"mcp__{BRIDGE_SERVER}__{t}" for t in rt.broker_tools]
+        if allow:
+            perms["allow"] = allow
         if rt.permissions.denied_tools:
             perms["deny"] = rt.permissions.denied_tools
         if perms:

@@ -11,12 +11,12 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 
 プロファイルから生まれるセッションは隔離コンテナで動かし、ホストやプロジェクトの設定・skill を読ませない（再現性のため）。実行履歴は送信原文まで残す。
 
-仕様書（ドラフト）：https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514
+仕様書（ドラフト。v0.4 で一から書き直した）：https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514
 
 ## 現状
 
 - 実装は `src/hbroker/` にあり、構成と使い方は README.md のとおり。
-- テストは `cd tests && python3 -m unittest test_units test_e2e` で、52 件すべて通る（v0.3 時点）。
+- テストは `cd tests && python3 -m unittest test_units test_e2e` で、52 件すべて通る（v0.4 時点）。
 - Docker の通しテスト（`tests/test_docker.py`、手順は README）も通る。確認できたのは次の点。
   - エージェントが uid 10001・ケーパビリティなし・マウントなしで動く
   - ワークスペースから設定ファイルが除去されている
@@ -42,7 +42,19 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 - **既存の試験用モジュールを移行**：akinator（branch `task/harness-broker`）と romaji-converter（同）。プロファイルの例は `profiles/examples/akinator*.yaml`、`romaji-converter.yaml`。偽の ACP エージェントで、ローカル参照とコミット固定の両方の通しの確認を済ませた。
 - 履歴のビューワーは、ユーザーから既存のビューワーを受け取ってから対応する。
 
-## v0.3 で変えたこと（2026-10-19）：通信を send と receive だけにした
+## v0.4 で変えたこと（2026-10-19）：最後の文章に意味を持たせない
+
+ユーザーの指摘：返事を求めないメッセージもあるので、最終応答を特別扱いすべきではない。akinator や romaji も本来 send で送り合う想定で、`ecosystem_send` のような接頭辞も要らない。元の仕様書は捨てて一から書き直す。
+
+- **自動のメッセージを全廃**：v0.3 の「最後の文章を返信にする規則」、空のときと終了時の通知メッセージ、`origin` をなくした。ブローカーは自分からメッセージを作らない。最後の文章は `turn.end` に記録するだけ。終了時に残った未読は捨てて `message.dropped` に残す。
+- **相手が黙ったことは receive で分かる**：`receive(from=X)` は、X が終了したか、管理下セッションの X が待機中で未読もないとき、待たずに空で返る（`from_quiet`、`from_state`）。X が待機・終了に移るとき、X を待っている receive を起こす（`Session.watching`）。
+- **返信は宛先を省ける**：`send(reply_to=m)` は m の送信元に届く。m が自分宛てでなければ 400。
+- **`brokerTools` を一覧に**：`[send]` などで渡すツールを選ぶ。ブリッジは `HB_TOOLS` で一覧を絞り、デーモンもトークンごとに 403 で拒否する。Claude Code の `settings.json` には `mcp__hb__<ツール>` を許可として書き込む（`permissions.mode: deny` でも send が使えるように）。
+- **見出しだけの形式に**：`messageFormat` を廃止。管理下セッションには `from:`、`message_id:`、`thread_id:`（返信なら `in_reply_to:`）の見出しと本文を渡す。接頭辞（`[harness-broker]`）も末尾の注記もなくした。
+- テストの偽エージェントは、実際のエージェントと同じく、ブリッジを常駐させて `send(reply_to=…)` で返す。
+- akinator と romaji-converter のモジュールを「受け取ったメッセージへの返信として send で送る」に戻し（前回、最後の文章で答える形にしたのは読み違い）、プロファイルを新しいコミット（akinator e776597、romaji 802842a）に固定した。指示に send があるときだけ send で返す偽エージェントで、両方の通しを確認した。古い指示のコミットでは、akinator が 0.3 秒で「返信せずにターンを終えた」と止まることも確かめた。
+
+## v0.3 で変えたこと（2026-10-19）：通信を send と receive だけにした（v0.4 で一部を撤回）
 
 ユーザーとの議論で「最終応答は本質的な概念ではない。機能は少なく本質的なものに揃える」と決め、仕様書に「通信モデル」の章を足してから作り直した。
 
@@ -64,7 +76,7 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 2. **外部の Claude Code**：`hb mcp --channel` で、Channels 経由で受信できるか確認する。
 3. **Codex**：`codex-acp` イメージを確認し、新しい `CODEX_HOME` での認証の渡し方を決める。
 4. **リポジトリへの組み込み**：このリポジトリの `Makefile` と CI に harness-broker のテストを入れる。CONTRIBUTING により `make test` が必須。
-5. **通信モデルの残り**（仕様書の未決事項）：作業を止めるメッセージの表し方、ハーネスのフックでの通知（すべてのツール呼び出しの切れ目）、通知に載せる内容。
+5. **通信モデルの残り**（仕様書の未決事項）：作業を止めるメッセージの表し方、ハーネスのフックでの通知（すべてのツール呼び出しの切れ目）、通知に載せる内容。実機では、モデルが send で返すか（最後の文章で答えて終わらないか）と、`mcp__hb__send` の許可だけで claude-agent-acp が確認なしに send を使えるかを最初に見る。
 6. **残りの未実装**：MCP Tasks、外向き通信の制限（egress プロキシ）、Gemini への組み込み、起動後の設定検証（README の「未実装・未確認」も参照）。
 
 このリポジトリの開発ルールは `.cursor/rules/*.mdc` と CONTRIBUTING.md にある（役割分担と TDD）。

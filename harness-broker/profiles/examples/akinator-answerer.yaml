@@ -1,10 +1,10 @@
 # Akinator answerer: the evaluation condition, from requirements/answerer.
 # Keep this profile fixed when comparing questioner versions.
 id: akinator-answerer
-version: 1.0.0
+version: 2.0.0
 module:
   repo: https://github.com/ysgrProgramming/akinator.git
-  ref: 5bba33aa9fdf5d7c38208db279e33f456738fa00
+  ref: e7765973892141361c886dd511e6d62e759154b9
   path: requirements/answerer
 spawnableBy: [external]
 runtime:
@@ -12,9 +12,8 @@ runtime:
   adapter: claude-agent-acp
   model: claude-haiku-5-5
   image: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  messageFormat: body
   sessionMode: per_message   # every question is answered in a fresh conversation
-  brokerTools: false
+  brokerTools: [send]        # answers each question with send
   permissions:
     mode: deny
     deniedTools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]

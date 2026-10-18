@@ -61,8 +61,7 @@ CREATE TABLE IF NOT EXISTS messages (
     body TEXT NOT NULL,
     idempotency_key TEXT,
     delivery TEXT NOT NULL,
-    delivered_at TEXT,
-    origin TEXT NOT NULL DEFAULT 'send'
+    delivered_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(from_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS messages_inbox ON messages(to_id, delivered_at, ts);
@@ -82,9 +81,6 @@ class HistoryStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
-        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(messages)")}
-        if "origin" not in cols:  # state dirs from v0.2
-            self.db.execute("ALTER TABLE messages ADD COLUMN origin TEXT NOT NULL DEFAULT 'send'")
         self._secrets: dict[str, str] = {}
 
     # --- redaction -------------------------------------------------------
@@ -221,13 +217,11 @@ class HistoryStore:
         return dict(r) if r else None
 
     def insert_message(self, msg: dict[str, Any]) -> None:
-        """origin: "send" (the send tool), "final" (a turn's final text taken
-        as the reply), "notice" (written by the broker)."""
         with self._lock:
             self.db.execute(
-                "INSERT INTO messages(id, ts, from_id, to_id, thread_id, reply_to, body, idempotency_key, delivery, origin) "
-                "VALUES (:id, :ts, :from_id, :to_id, :thread_id, :reply_to, :body, :idempotency_key, :delivery, :origin)",
-                {"origin": "send", **msg},
+                "INSERT INTO messages(id, ts, from_id, to_id, thread_id, reply_to, body, idempotency_key, delivery) "
+                "VALUES (:id, :ts, :from_id, :to_id, :thread_id, :reply_to, :body, :idempotency_key, :delivery)",
+                msg,
             )
 
     def message(self, message_id: str) -> dict[str, Any] | None:

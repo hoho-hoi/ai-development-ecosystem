@@ -26,7 +26,7 @@ from starlette.routing import Route
 from . import __version__
 from .config import BrokerConfig, ensure_broker_key
 from .modules import ModuleCache
-from .profiles import ProfileRegistry
+from .profiles import BROKER_TOOLS, ProfileRegistry
 from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
@@ -40,13 +40,16 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_profiles": (set(), set()),
     "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout"}, {"profile"}),
-    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key"}, {"to", "body"}),
+    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
     "list_sessions": ({"profile", "state", "include_ended"}, set()),
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
     "history": ({"session", "thread_id", "since", "until", "kinds", "after_seq", "limit"}, set()),
 }
+
+
+assert set(BROKER_TOOLS) | {"whoami"} == set(TOOLS), "profiles.BROKER_TOOLS and daemon.TOOLS disagree"
 
 
 def make_runner(cfg: BrokerConfig) -> Runner:
@@ -133,7 +136,7 @@ class Broker:
         if tool == "send":
             return await m.send(
                 caller,
-                args["to"],
+                args.get("to"),
                 args["body"],
                 thread_id=args.get("thread_id"),
                 reply_to=args.get("reply_to"),
@@ -203,6 +206,8 @@ class Broker:
             caller = self.caller(request)
             if tool not in TOOLS:
                 raise BrokerError(f"unknown tool {tool!r}")
+            if caller.tools is not None and tool not in caller.tools and tool != "whoami":
+                raise Forbidden(f"{tool} is not among this session's tools ({', '.join(sorted(caller.tools)) or 'none'})")
             args = await request.json() if await request.body() else {}
             if not isinstance(args, dict):
                 raise BrokerError("arguments must be a JSON object")

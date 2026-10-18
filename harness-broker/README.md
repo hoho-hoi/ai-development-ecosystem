@@ -7,7 +7,7 @@
 - **再現性**：イメージは digest、ワークスペースはコミット SHA で固定します。CLAUDE.md・AGENTS.md・`.claude/` などプロジェクト側の設定は全階層から除去し、ホストの `~/.claude` や `~/.codex` も読ませません。
 - **実行履歴**：送信原文、セッションに実際に投入した文面、ACP の生のやりとりまで、追記専用で記録します。
 
-状態は v0.3 です。末尾の「未実装・未確認」も読んでください。
+状態は v0.4 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
 
 ## 構成
 
@@ -15,10 +15,10 @@
 外部セッション（人が起動）          ブローカー（hb daemon）              管理下セッション（コンテナ）
 ┌───────────────────────┐         ┌─────────────────────────┐         ┌──────────────────────────┐
 │ Claude Code / Codex   │  MCP    │ HTTP API                │  ACP    │ ACP アダプタ + ハーネス   │
-│  └ hb mcp（ブリッジ）  │────────▶│ SessionManager          │────────▶│ /workspace（消毒済み）    │
-│                       │◀────────│ 履歴（JSONL + SQLite）   │◀────────│  └ hb ブリッジ（MCP）     │
-└───────────────────────┘ push /  │ Runner（docker / local）│  MCP    └──────────────────────────┘
-                          pull    └─────────────────────────┘
+│  └ hb mcp（ブリッジ）  │────────▶│ 受信箱・SessionManager   │────────▶│ /workspace（消毒済み）    │
+│ スクリプト（HTTP）      │◀────────│ 履歴（JSONL + SQLite）   │◀────────│  └ hb ブリッジ（MCP）     │
+└───────────────────────┘         │ Runner（docker / local）│  HTTP   └──────────────────────────┘
+                                  └─────────────────────────┘
 ```
 
 - セッションは全員、stdio の MCP サーバー `hb mcp`（ブリッジ）を通してブローカーのツールを使います。ブリッジは標準ライブラリだけで書かれた単一ファイル（`src/hbroker/bridge.py`）で、イメージにもそのままコピーされます。
@@ -26,27 +26,36 @@
 
 ## 通信モデル
 
+通信の道具は `send` と `receive` の2つだけです。ツール名に接頭辞は付けません。
+
 セッションは全員（管理下・外部・操作者）、受信箱を1つ持ちます。`send` は宛先の受信箱に入れてすぐ返り、メッセージは次のどちらかで取り出されるまで未読のままです。
 
 | 取り出し方 | 待てる時間 | 使う場面 |
 | --- | --- | --- |
 | `receive` を呼ぶ（`from`・`reply_to` で絞り込める） | 1回最大 600 秒 | 来ると分かっている返事を待つ |
-| ターンを終える（管理下セッションのみ） | 無期限 | 次の依頼を待つ。ブローカーが最も古い未読を次のプロンプトとして投入する |
+| ターンを終える（管理下セッションのみ） | 無期限 | 次の依頼を待つ。ブローカーが最も古い未読を次のプロンプトとして渡す |
 
-- **通知**：`receive` 以外のツールの結果には、未読の件数と送信元を添えます（ブリッジは本文の後ろに1行足します。HTTP では `X-HB-Unread` ヘッダー）。中身は `receive` で読みます。Channels でつないだ Claude Code には本文ごと push します。
-- **最終応答の翻訳規則**：管理下セッションのターンがメッセージ M で始まり、M 自身が返信（`reply_to` 付き）でないとき、ターンの終わりに次のどれかが起きます。
-  - そのターン中に M の送信元へ `reply_to: M` で `send` していれば、最後の文章は履歴に残すだけ。
-  - していなければ、最後の文章（最後のツール呼び出しより後の文章）を M への返信として送信元に送る。
-  - 最後の文章が空なら、「返信なしでターンが終わった」という通知を送信元に送る。
-- 返信で始まったターンは何も自動で送りません。自動の返信同士が往復し続けないためです。
-- セッションが終わると、未読のまま残ったメッセージは破棄し、返事を待っている送信元（返信でないメッセージの送信元）に「答える前に終了した」と知らせます。
-- 受け取ったメッセージの `origin` で出どころが分かります：`send`（`send` ツール）、`final`（最後の文章を返信にしたもの）、`notice`（ブローカーの通知）。
+- **最後の文章は誰にも届かない**：ターンの終わりにエージェントが書いた文章は、履歴（`turn.end`）に残すだけです。返事も報告も `send` で送ります。ブローカーが自分からメッセージを作ることはありません。
+- **返信**：`reply_to` にもとのメッセージの id を付けた `send`。宛先を省くと、もとのメッセージの送信元に届き、スレッドも引き継ぎます。
+- **相手が黙ったとき**：`receive` に `from` を付けて待っていると、その相手がもう何も送れない状態（管理下セッションが待機中で未読もない、または終了した）になった時点で、空のまま返ります（`from_quiet: true`）。返事をせずにターンを終えたことも、落ちたことも、待つ側はこれで知ります。
+- **通知**：`receive` 以外のツールの結果には、未読の件数と送信元を添えます（ブリッジは結果の後ろに1行足します。HTTP では `X-HB-Unread` ヘッダー）。中身は `receive` で読みます。Channels でつないだ Claude Code には本文ごと push します。
+- **管理下セッションへの渡し方**：見出しを付けた本文を、ACP のプロンプトとして渡します。
+
+```
+from: akinator-case (s-3f2a91c0e1b2)
+message_id: m-81c04d2e7a19
+thread_id: t-6c76c0c21fa4
+
+対象を1つ決めました。質問を始めてください。
+```
+
+- セッションが終わると、未読のまま残ったメッセージは捨てて、履歴（`message.dropped`）に残します。誰にも何も送りません。
 
 依頼して答えを受け取る基本の形はこうなります。
 
 ```sh
 hb call send '{"to": "reviewer", "body": "src/ の変更をレビューして"}' --config hb.yaml   # → message_id
-hb call receive '{"reply_to": "<message_id>", "wait": 600}' --config hb.yaml
+hb call receive '{"from": "reviewer", "reply_to": "<message_id>", "wait": 600}' --config hb.yaml
 ```
 
 ## 必要なもの
@@ -115,9 +124,8 @@ claude-agent-acp が `ANTHROPIC_API_KEY` をそのまま使えるかは実機で
 | `runtime.model` | モデル ID（固定値） |
 | `runtime.image` | `sha256:<image id>` または `<name>@sha256:<digest>`。タグは拒否 |
 | `runtime.instructions` / `bundledSkills` | モジュールを使わない場合の指示と skill。`module` とは併用できない |
-| `runtime.messageFormat` | `envelope`（既定。送信元・メッセージID・スレッドの見出しを付ける）か `body`（本文だけをそのまま渡す） |
 | `runtime.sessionMode` | `persistent`（既定。1つの会話を続ける）か `per_message`（メッセージごとに新しい会話。コンテナは同じ） |
-| `runtime.brokerTools` | ブローカーのツール（spawn、send など）を持たせるか。既定 `true` |
+| `runtime.brokerTools` | 渡すブローカーのツールの一覧（`[send]` など）。`true` はすべて（既定）、`false` はなし。ブローカーもセッションのトークンに同じ制限をかけ、Claude Code では `mcp__hb__<ツール>` を許可リストに入れる |
 | `runtime.permissions` | ACP の権限要求への答え方（`mode`、`allowKinds`）と、ハーネス側の許可・拒否リスト（`allowedTools`、`deniedTools`） |
 | `runtime.secrets` / `env` | 渡す秘密情報の環境変数名 / 秘密でない環境変数 |
 | `workspace.repo` / `ref` | clone するリポジトリとコミット SHA（ブランチ名は拒否） |
@@ -152,11 +160,11 @@ codex mcp add hb -- hb mcp --harness codex
 
 | ツール | 内容 |
 | --- | --- |
-| `list_profiles` | プロファイル一覧（Agent Card 相当） |
+| `send` | 宛先（id か名前）の受信箱に入れて、すぐ `message_id` を返す。`reply_to` があれば宛先は省ける |
+| `receive` | 自分宛ての未読を取り出す。`from`・`reply_to` で絞り込み、`wait` 秒（最大 600）まで待てる。`from` の相手が黙れば待たずに返る |
 | `spawn` | プロファイルからセッションを起動。`task` を渡すと最初のメッセージになり、結果の `task_message_id` で返事を `receive` できる |
-| `send` | セッション（id か名前）の受信箱に入れて、すぐ `message_id` を返す |
-| `receive` | 自分宛ての未読を取り出す。`from`・`reply_to` で絞り込み、`wait` 秒（最大 600）まで待てる |
-| `list_sessions` / `status` | 一覧と状態（直近の応答、経過時間、使用量） |
+| `list_profiles` | プロファイル一覧（Agent Card 相当） |
+| `list_sessions` / `status` | 一覧と状態（未読の数、直近のターンで書いた文章、経過時間、使用量） |
 | `terminate` | 自分が起動したセッション（または自分）を終了。記録を回収してからコンテナを破棄 |
 | `history` | 実行履歴を原文のまま取り出す |
 
@@ -164,7 +172,7 @@ codex mcp add hb -- hb mcp --harness codex
 
 ```sh
 hb call spawn '{"profile": "reviewer", "task": "src/ の変更をレビューして"}' --config hb.yaml
-hb call receive '{"reply_to": "<task_message_id>", "wait": 600}' --config hb.yaml
+hb call receive '{"from": "reviewer", "reply_to": "<task_message_id>", "wait": 600}' --config hb.yaml
 hb call history '{"session": "reviewer"}' --config hb.yaml
 ```
 
@@ -177,7 +185,7 @@ hb call history '{"session": "reviewer"}' --config hb.yaml
 - `sessions/<id>/harness/`：終了時にコンテナから回収した、ハーネス自身のセッション記録
 - `sessions/<id>/agent.stderr.log`：アダプタの標準エラー
 
-主なイベント：`session.spawn`（解決済みプロファイルの全文と fingerprint）、`session.workspace`（コミットと除去したパス）、`message.send`（送信原文と `origin`）、`message.deliver`（取り出し方：`turn` / `receive` / `dropped`）、`message.inject`（実際に投入した文面）、`acp.out` / `acp.in`（ACP のフレームそのまま）、`acp.permission`、`turn.end`（最後の文章と、翻訳規則で何が起きたか）、`session.end`
+主なイベント：`session.spawn`（解決済みプロファイルの全文と fingerprint）、`session.workspace`（コミットと除去したパス）、`message.send`（送信原文）、`message.deliver`（取り出し方：`turn` / `receive` / `dropped`）、`message.inject`（実際に渡した文面）、`acp.out` / `acp.in`（ACP のフレームそのまま）、`acp.permission`、`turn.end`（そのターンでエージェントが書いた文章。誰にも届けていない）、`session.end`
 
 セッションのトークンと、プロファイルが宣言した秘密情報の値は、書き込む前に `[REDACTED:…]` に置き換えます。操作者はすべての履歴を読めます。セッションが読めるのは、自分、自分が起動したセッション、自分が参加したスレッドの履歴だけです。
 
@@ -206,6 +214,7 @@ HB_TEST_DOCKER_IMAGE=$(docker inspect --format '{{.Id}}' hb-test-agent) python3 
 - **外向き通信の制限**：`network.egress` は宣言だけです。実際に絞るには `network.proxy` にフィルタ付きプロキシを指定するか、`network.mode: none` にします。
 - **作業の中断**：実行中のターンを止めるメッセージの表し方は未決です。いまは届いたメッセージを受信箱に入れるだけです。
 - **すべてのツール呼び出しでの通知**：通知はブローカーのツールの結果にしか付きません。ハーネス自身のツール（ファイル操作など）の結果にも付けるには、ハーネスのフックが必要です（未実装）。
+- **send の許可**：Claude Code の許可リストに `mcp__hb__send` などを入れることで、`permissions.mode: deny` のプロファイルでも send を使えるようにしています。実機の claude-agent-acp でこれだけで足りるかは未確認です。Codex 側の許可の設定は未対応です。
 - **起動後の設定検証**：読み込まれた指示ファイルが想定どおりかを、起動直後に確かめる仕組みはまだありません。
 - **履歴**：保持期間の設定と、宣言外の秘密情報のマスキングはありません。
 - **単一ホストのみ**です。

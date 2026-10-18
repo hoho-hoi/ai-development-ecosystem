@@ -124,14 +124,20 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
         profiles["modlocal"] = {
             "id": "modlocal", "version": "1.0.0",
             "module": {"local": str(mrepo), "path": "execution"},
-            "runtime": {**rt, "messageFormat": "body", "sessionMode": "per_message", "brokerTools": False,
+            "runtime": {**rt, "sessionMode": "per_message", "brokerTools": ["send"],
                         "permissions": {"mode": "deny", "deniedTools": ["Bash", "WebSearch"]}},
             "limits": base["limits"],
         }
         profiles["modrepo"] = {
             "id": "modrepo", "version": "1.0.0",
             "module": {"repo": str(mrepo), "ref": mcommit, "path": "requirements/peer"},
-            "runtime": {**rt, "messageFormat": "body"},
+            "runtime": {**rt, "brokerTools": ["send", "receive"]},
+            "limits": base["limits"],
+        }
+        profiles["notools"] = {
+            "id": "notools", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "execution"},
+            "runtime": {**rt, "brokerTools": False},
             "limits": base["limits"],
         }
     for pid, data in profiles.items():

@@ -199,10 +199,13 @@ class ModuleTests(unittest.TestCase):
 
     def test_denied_tools_in_claude_settings(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal(runtime={"permissions": {"deniedTools": ["Bash", "WebFetch"]}}))
+            p = profile_from_dict(minimal(runtime={"permissions": {"deniedTools": ["Bash", "WebFetch"]},
+                                                   "brokerTools": ["send", "receive"]}))
             prepare_harness_config(p, Path(t), "/rt", "hi", [])
             settings = json.loads((Path(t) / "claude/settings.json").read_text())
             self.assertEqual(settings["permissions"]["deny"], ["Bash", "WebFetch"])
+            # the broker tools the profile grants are allowed outright
+            self.assertEqual(settings["permissions"]["allow"], ["mcp__hb__send", "mcp__hb__receive"])
 
 
 class DockerArgsTests(unittest.TestCase):
@@ -288,35 +291,40 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(states, {"a": "lost", "b": "terminated"})
             st.close()
 
-    def test_mailbox_filters_and_v02_migration(self):
-        import sqlite3
-
+    def test_mailbox_filters(self):
         with tempfile.TemporaryDirectory() as t:
-            # a v0.2 index: messages without the origin column, one unread row
-            db = sqlite3.connect(Path(t) / "index.sqlite3")
-            db.execute(
-                "CREATE TABLE messages (id TEXT PRIMARY KEY, ts TEXT NOT NULL, from_id TEXT NOT NULL, "
-                "to_id TEXT NOT NULL, thread_id TEXT NOT NULL, reply_to TEXT, body TEXT NOT NULL, "
-                "idempotency_key TEXT, delivery TEXT NOT NULL, delivered_at TEXT)"
-            )
-            db.execute("INSERT INTO messages VALUES ('m0','2026-01-01T00:00:00','a','me','t','', 'old', NULL, 'inbox', NULL)")
-            db.commit()
-            db.close()
             st = HistoryStore(t)
-            self.assertEqual(st.unread("me")[0]["origin"], "send")
             row = {"to_id": "me", "thread_id": "t", "idempotency_key": None, "delivery": "mailbox"}
             st.insert_message({**row, "id": "m1", "ts": "2026-01-02", "from_id": "a", "reply_to": None, "body": "1"})
-            st.insert_message({**row, "id": "m2", "ts": "2026-01-03", "from_id": "b", "reply_to": "m9", "body": "2", "origin": "final"})
+            st.insert_message({**row, "id": "m2", "ts": "2026-01-03", "from_id": "b", "reply_to": "m9", "body": "2"})
             st.insert_message({**row, "id": "m3", "ts": "2026-01-04", "from_id": "a", "reply_to": None, "body": "3"})
-            self.assertEqual([m["id"] for m in st.unread("me", from_id="a")], ["m0", "m1", "m3"])
+            self.assertEqual([m["id"] for m in st.unread("me", from_id="a")], ["m1", "m3"])
             self.assertEqual([m["id"] for m in st.unread("me", reply_to="m9")], ["m2"])
-            self.assertEqual([m["id"] for m in st.unread("me", limit=1)], ["m0"])
-            self.assertEqual(st.unread_by_sender("me"), [("a", 3), ("b", 1)])
+            self.assertEqual([m["id"] for m in st.unread("me", limit=1)], ["m1"])
+            self.assertEqual(st.unread_by_sender("me"), [("a", 2), ("b", 1)])
             st.mark_delivered("m2", "receive")
             self.assertEqual(st.message("m2")["delivery"], "receive")
-            self.assertEqual(st.unread_by_sender("me"), [("a", 3)])
+            self.assertEqual(st.unread_by_sender("me"), [("a", 2)])
             st.close()
 
+    def test_broker_tools_setting(self):
+        base = {"id": "p", "version": "1", "name": "p", "description": "d",
+                "runtime": {"harness": "claude-code", "adapter": "x", "model": "m", "image": FAKE_DIGEST}}
+        def tools(v):
+            data = json.loads(json.dumps(base))
+            if v is not None:
+                data["runtime"]["brokerTools"] = v
+            return profile_from_dict(data, Path(".")).runtime.broker_tools
+        self.assertEqual(tools(None)[:2], ["send", "receive"])
+        self.assertEqual(len(tools(True)), 8)
+        self.assertEqual(tools(False), [])
+        self.assertEqual(tools(["send"]), ["send"])
+        with self.assertRaises(Exception):
+            tools(["send", "spawm"])
+        data = json.loads(json.dumps(base))
+        data["runtime"]["messageFormat"] = "body"  # removed in v0.4
+        with self.assertRaises(Exception):
+            profile_from_dict(data, Path("."))
 
 if __name__ == "__main__":
     unittest.main()

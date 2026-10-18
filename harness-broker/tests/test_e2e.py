@@ -1,12 +1,15 @@
 """End-to-end: broker over HTTP, local runner, fake ACP agent, and the stdio
-bridge driven by the official MCP SDK client."""
+bridge driven by the official MCP SDK client.
+
+The fake agent answers the way every agent must: with send(reply_to=...).
+"""
 
 import asyncio
 import json
 import os
-import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,21 +34,28 @@ class BrokerCase(unittest.IsolatedAsyncioTestCase):
         os.environ.pop("HB_TEST_HOST_ONLY", None)
         self._tmp.cleanup()
 
-    async def reply_to(self, message_id, token=None, wait=20):
-        """receive the reply to `message_id` (the only primitive needed)."""
-        res = await self.b.tool("receive", token, reply_to=message_id, wait=wait)
+    async def reply_to(self, message_id, token=None, wait=20, sender=None):
+        """receive the reply to `message_id` (from `sender` when given)."""
+        args = {"reply_to": message_id, "wait": wait}
+        if sender:
+            args["from"] = sender
+        res = await self.b.tool("receive", token, **args)
         if not res["messages"]:
-            self.fail(f"no reply to {message_id}")
+            self.fail(f"no reply to {message_id}: {res}")
         self.assertEqual(len(res["messages"]), 1, res)
         return res["messages"][0]
 
     async def ask(self, to, body, token=None, wait=30):
         sent = await self.b.tool("send", token, to=to, body=body)
-        return sent, await self.reply_to(sent["message_id"], token, wait)
+        return sent, await self.reply_to(sent["message_id"], token, wait, sender=sent["to"])
 
     def first_message_id(self, session_id):
         ev = self.b.broker.store.events(session_id="operator", kinds=["message.send"])
         return [e for e in ev if e["payload"]["to"] == session_id][0]["message_id"]
+
+    async def turn_text(self, sid, message_id):
+        ev = (await self.b.tool("history", session=sid, kinds=["turn.end"]))["events"]
+        return next(e["payload"]["text"] for e in ev if e["message_id"] == message_id)
 
 
 class LifecycleTests(BrokerCase):
@@ -54,23 +64,23 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(st["state"], "idle", st)
         sid = st["id"]
         self.assertEqual(st["task_message_id"], self.first_message_id(sid))
-        reply = await self.reply_to(st["task_message_id"])
+        reply = await self.reply_to(st["task_message_id"], sender=sid)
         self.assertEqual(reply["body"], "echo: hello there")
         self.assertEqual(reply["from"], sid)
-        self.assertEqual(reply["origin"], "final")
 
-        # history: raw body, exact injected text, ACP frames, turn result
+        # history: raw bodies, the exact injected text, the turn's text, ACP frames
         hist = (await self.b.tool("history", thread_id=reply["thread_id"]))["events"]
         kinds = [e["kind"] for e in hist]
         for k in ("message.send", "message.inject", "turn.end", "message.deliver"):
             self.assertIn(k, kinds)
-        turn = next(e for e in hist if e["kind"] == "turn.end")
-        self.assertEqual(turn["payload"]["outcome"], "final text sent as the reply")
-        vias = [e["payload"]["via"] for e in hist if e["kind"] == "message.deliver"]
-        self.assertEqual(vias, ["turn", "receive"])
         inject = next(e for e in hist if e["kind"] == "message.inject")
-        self.assertIn("hello there", inject["payload"]["text"])
-        self.assertIn("[harness-broker] message from operator", inject["payload"]["text"])
+        self.assertEqual(
+            inject["payload"]["text"],
+            f"from: operator\nmessage_id: {st['task_message_id']}\nthread_id: {reply['thread_id']}\n\nhello there",
+        )
+        self.assertEqual([e["payload"]["via"] for e in hist if e["kind"] == "message.deliver"], ["turn", "receive"])
+        sends = [e for e in hist if e["kind"] == "message.send"]
+        self.assertEqual([e["session_id"] for e in sends], ["operator", sid])  # nothing written by the broker
         acp = (await self.b.tool("history", session=sid, kinds=["acp.out"]))["events"]
         methods = [e["payload"]["frame"].get("method") for e in acp]
         self.assertEqual(methods[:3], ["initialize", "session/new", "session/prompt"])
@@ -94,8 +104,8 @@ class LifecycleTests(BrokerCase):
 
     async def test_isolation_of_environment(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        sent = await self.b.tool("send", to=st["id"], body="ENV")
-        env = json.loads((await self.reply_to(sent["message_id"]))["body"])
+        _, r = await self.ask(st["id"], "ENV")
+        env = json.loads(r["body"])
         self.assertTrue(env["home"].startswith(str(self.b.cfg.state_dir / "bundles")), env["home"])
         self.assertEqual(env["files"], ["README.md", "docs", "src", "src/app.py"])  # stripped, pinned to commit a
         self.assertIn("CLAUDE.md", env["config_files"])  # the profile's instructions
@@ -107,12 +117,40 @@ class LifecycleTests(BrokerCase):
 
     async def test_bridge_entry_given_to_agent(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        sent = await self.b.tool("send", to=st["id"], body="MCP")
-        servers = json.loads((await self.reply_to(sent["message_id"]))["body"])
+        _, r = await self.ask(st["id"], "MCP")
+        servers = json.loads(r["body"])
         self.assertEqual(servers[0]["name"], "hb")
         env = {e["name"]: e["value"] for e in servers[0]["env"]}
         self.assertEqual(env["HB_TOKEN"], self.b.broker.manager.sessions[st["id"]].token)
-        self.assertEqual(set(env), {"HB_BROKER_URL", "HB_TOKEN"})
+        self.assertEqual(set(env), {"HB_BROKER_URL", "HB_TOKEN"})  # all tools: no HB_TOOLS
+
+    async def test_final_text_reaches_no_one(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True)
+        sent = await self.b.tool("send", to=st["id"], body="FINAL_ONLY")
+        t0 = time.monotonic()
+        r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
+        self.assertEqual(r["messages"], [])
+        self.assertTrue(r["from_quiet"], r)  # it went quiet: no need to wait the full 20 s
+        self.assertEqual(r["from_state"], "idle")
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertEqual(await self.turn_text(st["id"], sent["message_id"]), "this final text goes to no one")
+        self.assertEqual((await self.b.tool("receive"))["messages"], [])
+
+    async def test_quiet_when_the_other_side_fails(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True)
+        await self.b.tool("send", to=st["id"], body="CRASH")
+        t0 = time.monotonic()
+        r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
+        self.assertEqual((r["messages"], r["from_quiet"], r["from_state"]), ([], True, "failed"))
+        self.assertLess(time.monotonic() - t0, 10)
+        s = await self.b.tool("status", session=st["id"])
+        self.assertTrue("exited" in s["end_reason"] or "prompt failed" in s["end_reason"], s["end_reason"])
+
+    async def test_waiting_is_not_cut_short_while_work_is_pending(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True)
+        sent = await self.b.tool("send", to=st["id"], body="SLEEP 1")
+        r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})  # busy: wait for the reply
+        self.assertEqual([m["reply_to"] for m in r["messages"]], [sent["message_id"]])
 
     async def test_managed_session_talks_through_bridge(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
@@ -122,12 +160,27 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(json.loads(result["content"][0]["text"])["id"], st["id"])
         self.assertEqual(len(result["content"]), 1)  # nothing unread, so no notice
 
-        # a plain send from inside is an ordinary message; the final text still answers
-        out, final = await self.ask(st["id"], 'BRIDGE send {"to": "operator", "body": "hi from inside"}')
-        self.assertEqual(final["origin"], "final")
+        # a message to someone else, then the answer to the operator
+        _, answer = await self.ask(st["id"], 'BRIDGE send {"to": "operator", "body": "hi from inside"}')
+        self.assertFalse(json.loads(answer["body"])["isError"])
         got = (await self.b.tool("receive", **{"from": st["id"]}))["messages"]
-        self.assertEqual([m["body"] for m in got], ["hi from inside"])
-        self.assertIsNone(got[0]["reply_to"])
+        self.assertEqual([(m["body"], m["reply_to"]) for m in got], [("hi from inside", None)])
+
+    async def test_reply_without_to_goes_to_the_sender(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True)
+        await self.ask(st["id"], 'BRIDGE send {"to": "operator", "body": "a question for you"}')
+        question = (await self.b.tool("receive", **{"from": st["id"]}))["messages"][0]
+        answer = await self.b.tool("send", reply_to=question["message_id"], body="my answer")
+        self.assertEqual((answer["to"], answer["thread_id"]), (st["id"], question["thread_id"]))
+        echo = await self.reply_to(answer["message_id"], sender=st["id"])
+        self.assertEqual(echo["body"], "echo: my answer")
+        inject = (await self.b.tool("history", session=st["id"], kinds=["message.inject"]))["events"][-1]
+        self.assertIn(f"in_reply_to: {question['message_id']}", inject["payload"]["text"])
+        # a reply needs a message that was addressed to you
+        code, body = await self.b.post("/api/tools/send", {"reply_to": answer["message_id"], "body": "x"})
+        self.assertEqual(code, 400, body)
+        code, body = await self.b.post("/api/tools/send", {"body": "nowhere"})
+        self.assertEqual(code, 400, body)
 
     async def test_notice_lists_unread_mid_turn(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
@@ -135,56 +188,38 @@ class LifecycleTests(BrokerCase):
         await asyncio.sleep(0.1)
         second = await self.b.tool("send", to=st["id"], body="waiting in the mailbox")
         self.assertEqual(second["to_state"], "busy")
-        result = json.loads((await self.reply_to(first["message_id"]))["body"])
+        result = json.loads((await self.reply_to(first["message_id"], sender=st["id"]))["body"])
         self.assertEqual(len(result["content"]), 2, result)
         notice = result["content"][1]["text"]
         self.assertTrue(notice.startswith("You have 1 unread message: 1 from operator"), notice)
-        # the unread message was not consumed by the notice: it starts the next turn
+        # the notice does not consume it: it starts the next turn
         self.assertEqual((await self.reply_to(second["message_id"]))["body"], "echo: waiting in the mailbox")
 
     async def test_receive_mid_turn(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        first = await self.b.tool(
-            "send", to=st["id"], body='BRIDGE receive {"from": "operator", "wait": 20}'
-        )
+        first = await self.b.tool("send", to=st["id"], body='BRIDGE receive {"from": "operator", "wait": 20}')
         await asyncio.sleep(0.5)
         later = await self.b.tool("send", to=st["id"], body="for your receive")
-        result = json.loads((await self.reply_to(first["message_id"]))["body"])
+        result = json.loads((await self.reply_to(first["message_id"], sender=st["id"]))["body"])
         got = json.loads(result["content"][0]["text"])["messages"]
         self.assertEqual([m["message_id"] for m in got], [later["message_id"]])
         deliver = (await self.b.tool("history", session=st["id"], kinds=["message.deliver"]))["events"]
         self.assertEqual({e["message_id"]: e["payload"]["via"] for e in deliver}[later["message_id"]], "receive")
-        # taken mid-turn, so it does not start a turn of its own
-        self.assertEqual((await self.b.tool("receive", reply_to=later["message_id"], wait=1))["messages"], [])
-    async def test_history_access_is_limited_for_sessions(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        own = await self.b.tool("send", to=st["id"], body='BRIDGE history {"session": "self", "kinds": ["session.spawn"]}')
-        result = json.loads((await self.reply_to(own["message_id"]))["body"])
-        self.assertFalse(result["isError"], result)
-        self.assertEqual(len(json.loads(result["content"][0]["text"])["events"]), 1)
-        other = await self.b.tool("send", to=st["id"], body='BRIDGE history {"session": "operator"}')
-        result = json.loads((await self.reply_to(other["message_id"]))["body"])
-        self.assertTrue(result["isError"])
-        self.assertIn("403", result["content"][0]["text"])
+        # taken mid-turn, so it started no turn of its own and nothing answers it
+        r = await self.b.tool("receive", **{"from": st["id"], "reply_to": later["message_id"], "wait": 10})
+        self.assertEqual((r["messages"], r["from_quiet"]), ([], True))
 
-    async def test_sender_is_told_when_no_answer_comes(self):
+    async def test_unread_messages_dropped_at_end(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        first = await self.b.tool("send", to=st["id"], body="CRASH")
-        notice = await self.reply_to(first["message_id"])
-        self.assertIn("ended before answering", notice["body"])
-        self.assertEqual(notice["from"], st["id"])
-        self.assertEqual(notice["origin"], "notice")
-
-    async def test_unread_messages_dropped_at_end_notify_senders(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        busy = await self.b.tool("send", to=st["id"], body="SLEEP 5")
+        await self.b.tool("send", to=st["id"], body="SLEEP 5")
         await asyncio.sleep(0.2)
         waiting = await self.b.tool("send", to=st["id"], body="never read")
         await self.b.tool("terminate", session=st["id"], reason="stop now")
-        for sent in (busy, waiting):
-            n = await self.reply_to(sent["message_id"])
-            self.assertEqual(n["origin"], "notice")
-            self.assertIn("stop now", n["body"])
+        dropped = (await self.b.tool("history", session=st["id"], kinds=["message.dropped"]))["events"]
+        self.assertEqual([e["message_id"] for e in dropped], [waiting["message_id"]])
+        self.assertEqual((await self.b.tool("receive"))["messages"], [])  # the broker sends nobody anything
+        code, _ = await self.b.post("/api/tools/send", {"to": st["id"], "body": "too late"})
+        self.assertEqual(code, 404)
 
     async def test_messages_queue_while_busy(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
@@ -204,23 +239,12 @@ class LifecycleTests(BrokerCase):
 
     async def test_permissions_follow_profile(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        ok = await self.b.tool("send", to=st["id"], body="PERMISSION edit")
-        no = await self.b.tool("send", to=st["id"], body="PERMISSION execute")
-        self.assertEqual(json.loads((await self.reply_to(ok["message_id"]))["body"])["outcome"]["optionId"], "allow-once")
-        self.assertEqual(json.loads((await self.reply_to(no["message_id"]))["body"])["outcome"]["optionId"], "reject-once")
+        _, ok = await self.ask(st["id"], "PERMISSION edit")
+        _, no = await self.ask(st["id"], "PERMISSION execute")
+        self.assertEqual(json.loads(ok["body"])["outcome"]["optionId"], "allow-once")
+        self.assertEqual(json.loads(no["body"])["outcome"]["optionId"], "reject-once")
         perms = (await self.b.tool("history", session=st["id"], kinds=["acp.permission"]))["events"]
         self.assertEqual(len(perms), 2)
-
-    async def test_crash_marks_failed(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        await self.b.tool("send", to=st["id"], body="CRASH")
-        for _ in range(100):
-            s = await self.b.tool("status", session=st["id"])
-            if s["state"] == "failed":
-                break
-            await asyncio.sleep(0.1)
-        self.assertEqual(s["state"], "failed")
-        self.assertTrue("exited" in s["end_reason"] or "prompt failed" in s["end_reason"], s["end_reason"])
 
     async def test_idempotent_send(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
@@ -230,58 +254,18 @@ class LifecycleTests(BrokerCase):
         self.assertTrue(b.get("duplicate"))
 
 
-class BoundaryRuleTests(BrokerCase):
-    """The one translation rule for final responses."""
-
-    async def outcome(self, sid, message_id):
-        ev = (await self.b.tool("history", session=sid, kinds=["turn.end"]))["events"]
-        return next(e["payload"]["outcome"] for e in ev if e["message_id"] == message_id)
-
-    async def test_reply_during_turn_replaces_final_text(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        sent = await self.b.tool(
-            "send", to=st["id"], body='BRIDGE send {"to": "operator", "body": "early answer", "reply_to": "$MSG"}'
-        )
-        r = await self.reply_to(sent["message_id"])
-        self.assertEqual((r["body"], r["origin"]), ("early answer", "send"))
-        await asyncio.sleep(0.3)
-        self.assertEqual(await self.outcome(st["id"], sent["message_id"]), "replied during the turn: final text recorded only")
-        # the final text (the tool result) was recorded, not delivered
-        self.assertEqual((await self.b.tool("receive", wait=0.5))["messages"], [])
-
-    async def test_empty_final_text_notifies_sender(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        sent, r = await self.ask(st["id"], "SILENT")
-        self.assertEqual(r["origin"], "notice")
-        self.assertIn("ended its turn without replying", r["body"])
-
-    async def test_turn_started_by_a_reply_sends_nothing(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        q, a = await self.ask(st["id"], "question")
-        # answering the answer starts a turn whose final text is not sent back
-        back = await self.b.tool("send", to=st["id"], body="thanks", reply_to=a["message_id"])
-        self.assertEqual(back["thread_id"], q["thread_id"])
-        self.assertEqual((await self.b.tool("receive", wait=1.5))["messages"], [])
-        self.assertEqual(await self.outcome(st["id"], back["message_id"]), "turn started by a reply: final text recorded only")
-        inject = (await self.b.tool("history", session=st["id"], kinds=["message.inject"]))["events"][-1]
-        self.assertIn("This is a reply", inject["payload"]["text"])
-
-    async def test_final_text_is_what_follows_the_last_tool_call(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
-        _, r = await self.ask(st["id"], "TOOLCALL")
-        self.assertEqual(r["body"], "the answer is 42")
-
-
 class ModuleProfileTests(BrokerCase):
-    async def test_local_module_body_format_per_message(self):
+    async def test_local_module_per_message_with_send_only(self):
         st = await self.b.tool("spawn", profile="modlocal", wait=True)
         self.assertEqual(st["state"], "idle", st)
         sid = st["id"]
 
-        # body format: the prompt is exactly the message body
+        # the prompt is the header plus the body
         sent, r = await self.ask(sid, "RAW")
-        self.assertEqual(json.loads(r["body"]), {"prompt": "RAW"})
-        self.assertEqual(r["reply_to"], sent["message_id"])
+        self.assertEqual(
+            json.loads(r["body"])["prompt"],
+            f"from: operator\nmessage_id: {sent['message_id']}\nthread_id: {sent['thread_id']}\n\nRAW",
+        )
 
         # the module's instructions and skills, and the denied tools, reach the harness
         _, r = await self.ask(sid, "INSTRUCTIONS")
@@ -289,6 +273,7 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual(found["CLAUDE.md"], "You are the test module.\n")
         self.assertEqual(found["skills"], ["mod-skill"])
         self.assertEqual(found["settings"]["permissions"]["deny"], ["Bash", "WebSearch"])
+        self.assertEqual(found["settings"]["permissions"]["allow"], ["mcp__hb__send"])  # never blocked by "deny"
 
         # per_message: every message gets a fresh conversation; the old one is closed
         _, r = await self.ask(sid, "SESSION")
@@ -297,17 +282,28 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual(info["session"], "fake-session-3")  # 3rd message, 3rd conversation
         self.assertEqual(info["closed"], ["fake-session-1", "fake-session-2"])
 
-        # brokerTools: false -> no MCP servers at all
+        # brokerTools: [send] -> the bridge offers send only, and the broker enforces it
         _, r = await self.ask(sid, "MCP")
-        self.assertEqual(json.loads(r["body"]), [])
-
-        # every reply was taken exactly once
-        self.assertEqual((await self.b.tool("receive"))["messages"], [])
+        env = {e["name"]: e["value"] for e in json.loads(r["body"])[0]["env"]}
+        self.assertEqual(env["HB_TOOLS"], "send")
+        _, r = await self.ask(sid, 'BRIDGE spawn {"profile": "echo"}')
+        self.assertEqual(json.loads(r["body"])["rpc_error"]["code"], -32602)  # not offered
+        token = self.b.broker.manager.sessions[sid].token
+        code, body = await self.b.post("/api/tools/spawn", {"profile": "echo"}, token)
+        self.assertEqual(code, 403, body)
+        self.assertIn("not among this session's tools", body["error"])
 
         # module source and file hashes are in the history
         mod = (await self.b.tool("history", session=sid, kinds=["session.module"]))["events"][0]["payload"]
         self.assertEqual(mod["spec"]["id"], "mod")
         self.assertIn("AGENTS.md", mod["files"])
+
+    async def test_no_broker_tools_means_no_bridge(self):
+        st = await self.b.tool("spawn", profile="notools", wait=True)
+        sent = await self.b.tool("send", to=st["id"], body="MCP")
+        r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
+        self.assertEqual((r["messages"], r["from_quiet"]), ([], True))  # it cannot answer at all
+        self.assertEqual(json.loads(await self.turn_text(st["id"], sent["message_id"])), [])
 
     async def test_repo_module_pinned_by_commit(self):
         profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
@@ -326,8 +322,8 @@ class ModuleProfileTests(BrokerCase):
     async def test_receive_wait_is_bounded_and_filters(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
         slow = await self.b.tool("send", to=st["id"], body="SLEEP 1.5")
-        quick_target = await self.b.tool("spawn", profile="echo", name="other", wait=True)
-        quick = await self.b.tool("send", to=quick_target["id"], body="fast")
+        other = await self.b.tool("spawn", profile="echo", name="other", wait=True)
+        quick = await self.b.tool("send", to=other["id"], body="fast")
         r = await self.b.tool("receive", reply_to=slow["message_id"], wait=0.3)
         self.assertEqual(r["messages"], [])  # timed out; the fast reply is not taken by this filter
         late = await self.reply_to(slow["message_id"])
@@ -392,21 +388,20 @@ class BridgeTests(BrokerCase):
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as client:
                 await client.initialize()
-                tools = {t.name for t in (await client.list_tools()).tools}
+                tools = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
-                    tools,
-                    {"list_profiles", "spawn", "send", "receive", "list_sessions", "status", "terminate", "history"},
+                    tools, ["send", "receive", "list_profiles", "spawn", "list_sessions", "status", "terminate", "history"]
                 )
                 res = await client.call_tool("list_profiles", {})
                 profiles = json.loads(res.content[0].text)["profiles"]
-                self.assertEqual(sorted(p["id"] for p in profiles), ["echo", "locked", "modlocal", "modrepo"])
+                self.assertEqual(sorted(p["id"] for p in profiles), ["echo", "locked", "modlocal", "modrepo", "notools"])
 
                 res = await client.call_tool("spawn", {"profile": "echo", "task": "via bridge"})
                 self.assertFalse(res.is_error, res.content)
                 st = json.loads(res.content[0].text)
                 self.assertEqual(st["state"], "idle")
 
-                res = await client.call_tool("receive", {"reply_to": st["task_message_id"], "wait": 20})
+                res = await client.call_tool("receive", {"from": st["id"], "reply_to": st["task_message_id"], "wait": 20})
                 got = json.loads(res.content[0].text)["messages"]
                 self.assertEqual([m["body"] for m in got], ["echo: via bridge"])
                 self.assertEqual(len(res.content), 1)  # receive never carries a notice
@@ -429,6 +424,21 @@ class BridgeTests(BrokerCase):
                 break
             await asyncio.sleep(0.1)
         self.assertEqual(ext.state, "terminated")
+
+    async def test_tool_list_follows_hb_tools(self):
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(BRIDGE), "--name", "limited",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=self.b.bridge_env(HB_TOOLS="send,receive"),
+        )
+        try:
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n").encode())
+            await proc.stdin.drain()
+            listed = json.loads(await asyncio.wait_for(proc.stdout.readline(), 30))
+            self.assertEqual([t["name"] for t in listed["result"]["tools"]], ["send", "receive"])
+        finally:
+            proc.stdin.close()
+            await asyncio.wait_for(proc.wait(), 15)
 
     async def test_channel_push(self):
         proc = await asyncio.create_subprocess_exec(

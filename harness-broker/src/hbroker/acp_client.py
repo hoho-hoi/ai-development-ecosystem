@@ -45,8 +45,7 @@ class AcpClient:
         self.permissions = permissions
         self._on_update = on_update
         self._on_permission = on_permission
-        # session id -> text segments of the running turn; a tool call starts a new one
-        self._collect: dict[str, list[list[str]]] = {}
+        self._collect: dict[str, list[str]] = {}  # session id -> agent text of the running turn
         self._cancelled: set[str] = set()
         self.agent_info: dict[str, Any] = {}
         self.peer = JsonRpcPeer(
@@ -78,18 +77,14 @@ class AcpClient:
         return result["sessionId"]
 
     async def prompt(self, session_id: str, text: str) -> tuple[str, str]:
-        """Run one prompt turn. Returns (stopReason, final text): the last
-        non-empty run of agent text, i.e. what the agent wrote after its last
-        tool call (narration before tool calls is not part of it)."""
-        self._collect[session_id] = [[]]
+        """Run one prompt turn. Returns (stopReason, the text the agent wrote)."""
+        self._collect[session_id] = []
         self._cancelled.discard(session_id)
         try:
             result = await self.peer.request(
                 "session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}
             )
-            segments = ["".join(seg) for seg in self._collect.get(session_id, [])]
-            final = next((t for t in reversed(segments) if t.strip()), "")
-            return (result or {}).get("stopReason", "end_turn"), final
+            return (result or {}).get("stopReason", "end_turn"), "".join(self._collect.get(session_id, []))
         finally:
             self._collect.pop(session_id, None)
 
@@ -104,14 +99,10 @@ class AcpClient:
         if method != "session/update" or not isinstance(params, dict):
             return
         update = params.get("update") or {}
-        segments = self._collect.get(params.get("sessionId"))  # type: ignore[arg-type]
-        kind = update.get("sessionUpdate")
-        if segments is not None and kind == "agent_message_chunk":
+        if update.get("sessionUpdate") == "agent_message_chunk":
             content = update.get("content") or {}
-            if content.get("type") == "text":
-                segments[-1].append(content.get("text", ""))
-        elif segments is not None and kind == "tool_call" and segments[-1]:
-            segments.append([])
+            if content.get("type") == "text" and params.get("sessionId") in self._collect:
+                self._collect[params["sessionId"]].append(content.get("text", ""))
         if self._on_update:
             self._on_update(params)
 

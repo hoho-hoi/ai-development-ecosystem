@@ -7,27 +7,25 @@ External sessions (registered through the bridge) are "active" until they
 unregister or are terminated. The operator (the broker key holder, e.g. the
 `hb` CLI) is a permanent pseudo-session named "operator".
 
-Communication has two primitives, send and receive. Every session (managed,
-external, the operator) has one mailbox: the message table. A message stays
-unread until it is taken in one of two ways:
+Communication has two primitives, send and receive, and nothing else. Every
+session (managed, external, the operator) has one mailbox: the message table.
+A message stays unread until it is taken in one of two ways:
 
   * receive: the recipient takes matching messages, waiting a bounded time.
   * turn end (managed sessions only): when a turn ends, the broker takes the
     oldest unread message and prompts the session with it. Ending a turn is
     an unbounded receive.
 
+What an agent writes at the end of a turn is recorded and delivered to no
+one; whatever should reach someone is sent with send. The broker never writes
+messages itself.
+
+receive(from=X) returns at once, empty, when X can send nothing more: X has
+ended, or X is a managed session that is idle with nothing unread. That is
+how a waiting session learns that X finished its turn without writing to it.
+
 Results of the other tools carry a notice of unread messages (count and
 senders); the content is read with receive.
-
-One boundary rule translates final responses, because models are trained to
-answer with them. When a turn that a message M started (M not itself a reply)
-ends:
-  * the session sent a reply to M (send to M's sender with reply_to = M):
-    the final text is only recorded;
-  * otherwise a non-empty final text is sent to M's sender as the reply;
-  * otherwise M's sender gets a notice that the turn ended without a reply.
-Turns started by a reply send nothing automatically, so two sessions never
-answer each other's answers forever.
 """
 
 from __future__ import annotations
@@ -45,10 +43,10 @@ from typing import Any
 
 from .acp_client import AcpClient
 from .config import BrokerConfig
-from .harness import harness_record_dir, prepare_harness_config, resolve_definition
+from .harness import BRIDGE_SERVER, harness_record_dir, prepare_harness_config, resolve_definition
 from .modules import ModuleCache
 from .jsonrpc import ConnectionClosed, RpcError
-from .profiles import Profile, ProfileRegistry
+from .profiles import BROKER_TOOLS, Profile, ProfileRegistry
 from .runner import RunHandle, Runner
 from .store import HistoryStore, now
 from .workspace import prepare_workspace
@@ -103,13 +101,14 @@ class Session:
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     finalized: asyncio.Event = field(default_factory=asyncio.Event)
-    last_reply: str | None = None
+    last_text: str | None = None  # what the agent wrote in its last turn (delivered to no one)
     turns: int = 0
     usage: dict[str, Any] | None = None
-    current: dict[str, Any] | None = None  # message row whose turn is running
-    replied: bool = False  # the session replied to `current` during the turn
-    # set whenever a message is put in this session's mailbox
+    tools: frozenset[str] | None = None  # broker tools this session may call; None = all
+    # set whenever a message is put in this session's mailbox, and whenever a
+    # session this one is waiting on (receive from=) goes quiet
     mail: asyncio.Event = field(default_factory=asyncio.Event)
+    watching: dict[str, int] = field(default_factory=dict)  # session id -> pending receive(from=) calls
 
     @property
     def live(self) -> bool:
@@ -149,31 +148,14 @@ class Session:
         }
 
 
-def format_injection(msg: dict[str, Any], sender: Session | None, tools: bool) -> str:
-    """The exact text a managed session receives for a message (envelope format)."""
-    who = f"{sender.name} ({msg['from_id']})" if sender else msg["from_id"]
-    lines = [
-        f"[harness-broker] message from {who}",
-        f"message_id: {msg['id']}",
-        f"thread_id: {msg['thread_id']}",
-    ]
+def format_injection(msg: dict[str, Any], sender: Session | None) -> str:
+    """The exact text a managed session receives for a message: a short
+    header (who sent it, the ids needed to reply), a blank line, the body."""
+    who = msg["from_id"] if not sender or sender.name == sender.id else f"{sender.name} ({sender.id})"
+    lines = [f"from: {who}", f"message_id: {msg['id']}", f"thread_id: {msg['thread_id']}"]
     if msg["reply_to"]:
         lines.append(f"in_reply_to: {msg['reply_to']}")
-    lines += ["", msg["body"], ""]
-    if msg["reply_to"]:
-        lines.append(
-            "(This is a reply. Nothing is sent back automatically when your turn ends"
-            + ("; use the hb `send` tool to write to anyone.)" if tools else ".)")
-        )
-    elif tools:
-        lines.append(
-            "(When your turn ends, your final text goes back to the sender as the reply, unless you "
-            f"have already replied with the hb `send` tool (reply_to: {msg['id']}). Messages that arrive "
-            "while you work are delivered after this turn, or earlier with the hb `receive` tool.)"
-        )
-    else:
-        lines.append("(When your turn ends, your final text goes back to the sender as the reply.)")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + msg["body"]
 
 
 def public_message(row: dict[str, Any], sender: Session | None) -> dict[str, Any]:
@@ -184,7 +166,6 @@ def public_message(row: dict[str, Any], sender: Session | None) -> dict[str, Any
         "from_name": sender.name if sender else None,
         "thread_id": row["thread_id"],
         "reply_to": row["reply_to"],
-        "origin": row.get("origin", "send"),
         "body": row["body"],
         "sent_at": row["ts"],
     }
@@ -228,6 +209,19 @@ class SessionManager:
         self.store.record("session.state", session_id=s.id, old=old, new=state, **extra)
         if state in ("idle", "failed", "terminated"):
             s.ready.set()
+            self._wake_watchers(s)
+
+    def _wake_watchers(self, s: Session) -> None:
+        for other in self.sessions.values():
+            if other.watching.get(s.id):
+                other.mail.set()
+
+    def quiet(self, s: Session) -> bool:
+        """s can send nothing more for now: it has ended, or it is a managed
+        session that is idle with nothing unread to start a turn."""
+        if not s.live:
+            return True
+        return s.kind == "managed" and s.state == "idle" and not self.store.unread(s.id, limit=1)
 
     def by_token(self, token: str) -> Session:
         sid = self._by_token.get(token_hash(token))
@@ -323,6 +317,7 @@ class SessionManager:
                     parent_id=caller.id,
                     profile=profile,
                     meta={"ref": ref or profile.workspace.ref},
+                    tools=frozenset(profile.runtime.broker_tools),
                 )
             )
         self.store.record(
@@ -396,16 +391,20 @@ class SessionManager:
             )
             await s.acp.initialize()
             mcp_servers: list[dict[str, Any]] = []
-            if profile.runtime.broker_tools:
+            tools = profile.runtime.broker_tools
+            if tools:
+                env = [
+                    {"name": "HB_BROKER_URL", "value": s.handle.broker_url},
+                    {"name": "HB_TOKEN", "value": s.token},
+                ]
+                if set(tools) != set(BROKER_TOOLS):
+                    env.append({"name": "HB_TOOLS", "value": ",".join(tools)})
                 mcp_servers.append(
                     {
-                        "name": "hb",
+                        "name": BRIDGE_SERVER,
                         "command": s.handle.bridge_command[0],
                         "args": s.handle.bridge_command[1:],
-                        "env": [
-                            {"name": "HB_BROKER_URL", "value": s.handle.broker_url},
-                            {"name": "HB_TOKEN", "value": s.token},
-                        ],
+                        "env": env,
                     }
                 )
             mcp_servers += [
@@ -466,77 +465,62 @@ class SessionManager:
 
     async def _turn(self, s: Session, msg: dict[str, Any]) -> bool:
         assert s.acp is not None and s.acp_session_id is not None and s.profile is not None
-        rt = s.profile.runtime
-        sender = self.sessions.get(msg["from_id"])
-        text = msg["body"] if rt.message_format == "body" else format_injection(msg, sender, rt.broker_tools)
-        s.current, s.replied = msg, False
+        text = format_injection(msg, self.sessions.get(msg["from_id"]))
         self._set_state(s, "busy", message_id=msg["id"])
         self.store.record(
             "message.inject", session_id=s.id, thread_id=msg["thread_id"], message_id=msg["id"], via="turn", text=text
         )
         try:
-            if rt.session_mode == "per_message" and s.turns > 0:
+            if s.profile.runtime.session_mode == "per_message" and s.turns > 0:
                 await self._fresh_conversation(s)
             s.turns += 1
-            stop_reason, final = await s.acp.prompt(s.acp_session_id, text)
+            stop_reason, agent_text = await s.acp.prompt(s.acp_session_id, text)
         except (ConnectionClosed, RpcError) as e:
             self.store.record("session.error", session_id=s.id, stage="prompt", error=repr(e))
             await self._finalize(s, "failed", f"prompt failed: {e}")
             return False
-        s.last_reply = final
-        outcome = await self._turn_boundary(s, msg, final, stop_reason) if s.live else "session ended"
+        s.last_text = agent_text
+        # What the agent wrote is recorded only; it reaches no one.
         self.store.record(
             "turn.end",
             session_id=s.id,
             thread_id=msg["thread_id"],
             message_id=msg["id"],
             stop_reason=stop_reason,
-            reply=final,
-            outcome=outcome,
+            text=agent_text,
         )
-        s.current, s.replied = None, False
         if not s.live:
             return False
         self._set_state(s, "idle")
         return True
 
-    async def _turn_boundary(self, s: Session, msg: dict[str, Any], final: str, stop_reason: str) -> str:
-        """The one translation rule for final responses (see module docstring)."""
-        if msg["reply_to"]:
-            return "turn started by a reply: final text recorded only"
-        if s.replied:
-            return "replied during the turn: final text recorded only"
-        sender = self.sessions.get(msg["from_id"])
-        if not sender or not sender.live or sender.id == s.id:
-            return "sender gone: final text recorded only"
-        if final.strip():
-            await self._post(s, sender, final, msg["thread_id"], msg["id"], None, origin="final")
-            return "final text sent as the reply"
-        await self._post(
-            s, sender, f"({s.name} ended its turn without replying; stopReason={stop_reason})",
-            msg["thread_id"], msg["id"], None, origin="notice",
-        )
-        return "no reply: sender notified"
-
     # --- messaging ----------------------------------------------------------
     async def send(
         self,
         caller: Session,
-        to: str,
+        to: str | None,
         body: str,
         thread_id: str | None = None,
         reply_to: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Put a message in the target's mailbox and return at once."""
-        target = self.resolve(to)
+        """Put a message in the target's mailbox and return at once. Without
+        `to`, a reply goes to the sender of the message it answers."""
         if idempotency_key:
             existing = self.store.find_idempotent(caller.id, idempotency_key)
             if existing:
                 return {"message_id": existing["id"], "thread_id": existing["thread_id"], "duplicate": True}
-        cur = caller.current
-        if cur and reply_to == cur["id"] and target.id == cur["from_id"]:
-            caller.replied = True
+        if to:
+            target = self.resolve(to)
+        elif reply_to:
+            original = self.store.message(reply_to)
+            if not original or original["to_id"] != caller.id:
+                raise BrokerError(f"no message {reply_to!r} addressed to you; give `to` explicitly")
+            target = self.sessions.get(original["from_id"])
+            if not target or not target.live:
+                raise NotFound(f"the sender of {reply_to} ({original['from_id']}) has ended")
+        else:
+            raise BrokerError("send needs `to`, or `reply_to` to answer a message")
         return await self._post(caller, target, body, thread_id, reply_to, idempotency_key)
 
     async def _post(
@@ -547,7 +531,6 @@ class SessionManager:
         thread_id: str | None,
         reply_to: str | None,
         idempotency_key: str | None,
-        origin: str = "send",
     ) -> dict[str, Any]:
         if not thread_id and reply_to:
             original = self.store.message(reply_to)
@@ -566,7 +549,6 @@ class SessionManager:
                 "body": body,
                 "idempotency_key": idempotency_key,
                 "delivery": "mailbox",
-                "origin": origin,
             }
         )
         self.store.record(
@@ -577,7 +559,6 @@ class SessionManager:
             to=target.id,
             body=body,
             reply_to=reply_to,
-            origin=origin,
         )
         target.mail.set()
         return {
@@ -598,15 +579,17 @@ class SessionManager:
             self.store.record("message.deliver", session_id=s.id, thread_id=m["thread_id"], message_id=m["id"], via=via)
         return rows
 
-    async def _wait_mail(self, s: Session, take: Any, wait: float | None) -> list[dict[str, Any]]:
-        """Call take() until it returns something, s ends, or `wait` seconds
-        pass (None: no limit). take() runs without yielding to the event loop,
-        so two waiters never take the same message."""
+    async def _wait_mail(
+        self, s: Session, take: Any, wait: float | None, stop: Any = None
+    ) -> list[dict[str, Any]]:
+        """Call take() until it returns something, s ends, stop() is true, or
+        `wait` seconds pass (None: no limit). take() runs without yielding to
+        the event loop, so two waiters never take the same message."""
         loop = asyncio.get_running_loop()
         deadline = None if wait is None else loop.time() + wait
         while True:
             got = take()
-            if got or not s.live:
+            if got or not s.live or (stop is not None and stop()):
                 return got
             remaining = None if deadline is None else deadline - loop.time()
             if remaining is not None and remaining <= 0:
@@ -624,14 +607,32 @@ class SessionManager:
         self, s: Session, from_ref: str | None = None, reply_to: str | None = None, wait: float = 0
     ) -> dict[str, Any]:
         """Take the caller's unread messages that match the filters, waiting up
-        to `wait` seconds (max 600) for the first one."""
+        to `wait` seconds (max 600) for the first one. With `from`, return at
+        once when that session can send nothing more (see quiet())."""
         wait = max(0.0, min(float(wait or 0), 600.0))
-        from_id = self.resolve(from_ref, live_only=False).id if from_ref else None
-        rows = await self._wait_mail(s, lambda: self._take(s, via="receive", from_id=from_id, reply_to=reply_to), wait)
-        return {
+        src = self.resolve(from_ref, live_only=False) if from_ref else None
+
+        def take() -> list[dict[str, Any]]:
+            return self._take(s, via="receive", from_id=src.id if src else None, reply_to=reply_to)
+
+        if src is None:
+            rows = await self._wait_mail(s, take, wait)
+        else:
+            s.watching[src.id] = s.watching.get(src.id, 0) + 1
+            try:
+                rows = await self._wait_mail(s, take, wait, stop=lambda: self.quiet(src))
+            finally:
+                s.watching[src.id] -= 1
+                if not s.watching[src.id]:
+                    del s.watching[src.id]
+        out: dict[str, Any] = {
             "messages": [public_message(m, self.sessions.get(m["from_id"])) for m in rows],
             "unread_remaining": len(self.store.unread(s.id)),
         }
+        if src is not None:
+            out["from_state"] = src.state
+            out["from_quiet"] = self.quiet(src)
+        return out
 
     def unread_notice(self, s: Session) -> dict[str, Any] | None:
         """Count and senders of s's unread messages, attached to tool results."""
@@ -668,7 +669,7 @@ class SessionManager:
         info.update(
             {
                 "elapsed_seconds": None,
-                "last_reply": s.last_reply,
+                "last_text": s.last_text,
                 "usage": s.usage,
                 "unread": len(self.store.unread(s.id)),
                 "acp_session_id": s.acp_session_id,
@@ -707,23 +708,10 @@ class SessionManager:
         return self.status(s.id)
 
     async def _drop_mail(self, s: Session, reason: str) -> None:
-        """s is ending: its unread messages will never be read. Senders who
-        expect an answer (the message is not itself a reply) are told."""
-        unanswered = []
-        cur = s.current
-        if cur and not s.replied and not cur["reply_to"]:
-            unanswered.append(cur)
+        """s is ending: its unread messages will never be read. They are
+        dropped and recorded; nobody is sent anything."""
         for m in self._take(s, via="dropped"):
             self.store.record("message.dropped", session_id=s.id, thread_id=m["thread_id"], message_id=m["id"], reason=reason)
-            if not m["reply_to"]:
-                unanswered.append(m)
-        for m in unanswered:
-            sender = self.sessions.get(m["from_id"])
-            if sender and sender.live and sender.id != s.id:
-                await self._post(
-                    s, sender, f"(session {s.name} ({s.id}) ended before answering: {reason})",
-                    m["thread_id"], m["id"], None, origin="notice",
-                )
 
     async def _finalize(self, s: Session, state: str, reason: str) -> None:
         if not s.live:
@@ -738,7 +726,6 @@ class SessionManager:
             if t is not current:
                 t.cancel()
         await self._drop_mail(s, reason)
-        s.current = None
         try:
             if s.acp and prev == "busy" and s.acp_session_id:
                 try:
