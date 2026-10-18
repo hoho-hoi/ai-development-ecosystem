@@ -43,7 +43,14 @@ from typing import Any
 
 from .acp_client import AcpClient
 from .config import BrokerConfig
-from .harness import BRIDGE_SERVER, harness_record_dir, prepare_harness_config, resolve_definition
+from .harness import (
+    BRIDGE_SERVER,
+    CREDENTIAL_FILES,
+    harness_record_dir,
+    prepare_harness_config,
+    resolve_definition,
+)
+from .logins import LoginError, load_chatgpt_login, write_access_only
 from .modules import ModuleCache
 from .jsonrpc import ConnectionClosed, RpcError
 from .profiles import BROKER_TOOLS, Profile, ProfileRegistry
@@ -359,6 +366,13 @@ class SessionManager:
             if module_manifest:
                 self.store.record("session.module", session_id=s.id, **module_manifest)
             env = prepare_harness_config(profile, bundle / "hb", hb_path, instructions, skill_dirs)
+            if profile.runtime.login == "chatgpt":
+                login = load_chatgpt_login(self.cfg.codex_login_path)
+                login.check_fresh(profile.limits.max_runtime_minutes * 60)
+                for name, value in login.secrets.items():
+                    self.store.add_secret(name, value)
+                write_access_only(login, bundle / "hb" / "codex")
+                self.store.record("session.login", session_id=s.id, **login.summary())
             self.store.record("session.harness_env", session_id=s.id, env=env, secrets=profile.runtime.secrets)
             for name in profile.runtime.secrets:
                 if name in os.environ:
@@ -423,6 +437,10 @@ class SessionManager:
             self._set_state(s, "idle", acp_session_id=s.acp_session_id)
             s.tasks.append(asyncio.create_task(self._worker(s)))
             s.tasks.append(asyncio.create_task(self._deadline(s, profile.limits.max_runtime_minutes * 60)))
+        except LoginError as e:  # a condition for the user to fix, not a bug
+            log.warning("launch of %s refused: %s", s.id, e)
+            self.store.record("session.error", session_id=s.id, stage="login", error=str(e))
+            await self._finalize(s, "failed", f"launch failed: {e}")
         except Exception as e:
             log.exception("launch of %s failed", s.id)
             self.store.record("session.error", session_id=s.id, stage="launch", error=repr(e))
@@ -737,6 +755,9 @@ class SessionManager:
                 assert s.profile is not None
                 dest = self.cfg.history_dir / "sessions" / s.id / "harness"
                 ok = await self.runner.collect(s.handle, harness_record_dir(s.profile), dest)
+                for name in CREDENTIAL_FILES.get(s.profile.runtime.harness, ()):
+                    for f in dest.rglob(name) if dest.exists() else ():
+                        f.unlink()  # credentials never go into the history
                 self.store.record("session.harness_records", session_id=s.id, collected=ok, path=str(dest))
                 await self.runner.destroy(s.handle)
             elif s.profile is not None and not self.cfg.keep_bundles:

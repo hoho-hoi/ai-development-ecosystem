@@ -20,6 +20,7 @@ The reply is "echo: <body>", except for these bodies:
     BRIDGE <tool> <json>
                        call that bridge tool, reply with the tool result;
                        "$MSG" in the JSON becomes the current message id
+    CODEX_AUTH         reply with what the session's Codex login looks like
     FINAL_ONLY         write a final text but send nothing
     SILENT             write nothing and send nothing
     CRASH              exit with code 3
@@ -193,6 +194,16 @@ def handle_prompt(rid, params):
     elif body.startswith("BRIDGE "):
         _, tool, raw = body.split(" ", 2)
         reply = json.dumps(call_tool(tool, json.loads(raw.replace("$MSG", meta.get("message_id", "")))))
+    elif body == "CODEX_AUTH":
+        home = Path(os.environ.get("CODEX_HOME", "/nonexistent"))
+        auth = json.loads((home / "auth.json").read_text()) if (home / "auth.json").is_file() else None
+        reply = json.dumps({
+            "auth_file": auth is not None,
+            "refresh_token": (auth or {}).get("tokens", {}).get("refresh_token"),
+            "has_access_token": bool((auth or {}).get("tokens", {}).get("access_token")),
+            "config": (home / "config.toml").read_text() if (home / "config.toml").is_file() else None,
+            "env": {k: os.environ.get(k) for k in ("NO_BROWSER", "INITIAL_AGENT_MODE")},
+        })
     elif body == "FINAL_ONLY":
         reply, send_reply = "this final text goes to no one", False
     elif body == "SILENT":

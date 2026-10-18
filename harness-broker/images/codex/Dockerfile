@@ -8,7 +8,7 @@
 ARG BASE_IMAGE=node:22-bookworm-slim
 FROM ${BASE_IMAGE}
 
-ARG CODEX_ACP_VERSION=1.10.0
+ARG CODEX_ACP_VERSION=2.2.2
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates python3 util-linux \

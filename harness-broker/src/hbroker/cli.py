@@ -4,6 +4,8 @@
     hb mcp      [bridge options]             run the stdio MCP bridge (for a harness's MCP config)
     hb profiles [--config hb.yaml] [FILE…]   validate profiles and show their fingerprints
     hb call TOOL [JSON] [--config hb.yaml]   call a broker tool as the operator
+    hb codex-login [--status] [--device-auth] [--config hb.yaml]
+                                             log the broker in to a ChatGPT plan (Codex)
 """
 
 from __future__ import annotations
@@ -11,7 +13,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
+import subprocess
 import sys
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -66,6 +72,39 @@ def _cmd_call(a: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _cmd_codex_login(a: argparse.Namespace) -> None:
+    """Log in with the Codex CLI into the broker's own CODEX_HOME (file
+    storage), separate from the user's ~/.codex, then show the login."""
+    from .logins import LoginError, load_chatgpt_login
+
+    cfg = load_config(a.config)
+    home = cfg.codex_login_path
+    if not a.status:
+        home.mkdir(parents=True, exist_ok=True)
+        os.chmod(home, 0o700)
+        conf = home / "config.toml"
+        if 'cli_auth_credentials_store' not in (conf.read_text() if conf.exists() else ""):
+            with open(conf, "a", encoding="utf-8") as f:
+                f.write('cli_auth_credentials_store = "file"\n')
+        codex = shutil.which("codex")
+        if not codex:
+            sys.exit("the Codex CLI is not installed (npm install -g @openai/codex), or not on PATH")
+        cmd = [codex, "login"] + (["--device-auth"] if a.device_auth else [])
+        print(f"CODEX_HOME={home} {' '.join(cmd)}", file=sys.stderr)
+        code = subprocess.call(cmd, env={**os.environ, "CODEX_HOME": str(home)})
+        if code != 0:
+            sys.exit(code)
+    try:
+        login = load_chatgpt_login(home)
+    except LoginError as e:
+        sys.exit(f"error: {e}")
+    left = (login.expires_at - datetime.now(timezone.utc)).total_seconds() / 3600
+    print(f"login:   {home}")
+    print(f"account: {login.email or '?'} (plan: {login.plan or '?'})")
+    print(f"expires: {login.expires_at.isoformat()} ({left:.1f} h left)")
+    print("Sessions get a copy without the refresh token; log in again before it expires.")
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "mcp":
@@ -88,6 +127,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("json", nargs="?")
     p.add_argument("--config", type=Path)
     p.set_defaults(fn=_cmd_call)
+    p = sub.add_parser("codex-login", help="log the broker in to a ChatGPT plan for Codex sessions")
+    p.add_argument("--status", action="store_true", help="only show the current login")
+    p.add_argument("--device-auth", action="store_true", help="use the device-code flow instead of a browser")
+    p.add_argument("--config", type=Path)
+    p.set_defaults(fn=_cmd_codex_login)
     sub.add_parser("mcp", help="run the stdio MCP bridge (see hb mcp --help)")
     a = ap.parse_args(argv)
     a.fn(a)

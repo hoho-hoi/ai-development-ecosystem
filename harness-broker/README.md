@@ -7,7 +7,7 @@
 - **再現性**：イメージは digest、ワークスペースはコミット SHA で固定します。CLAUDE.md・AGENTS.md・`.claude/` などプロジェクト側の設定は全階層から除去し、ホストの `~/.claude` や `~/.codex` も読ませません。
 - **実行履歴**：送信原文、セッションに実際に投入した文面、ACP の生のやりとりまで、追記専用で記録します。
 
-状態は v0.4 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
+状態は v0.5 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
 
 ## 構成
 
@@ -128,6 +128,7 @@ claude-agent-acp が `ANTHROPIC_API_KEY` をそのまま使えるかは実機で
 | `runtime.brokerTools` | 渡すブローカーのツールの一覧（`[send]` など）。`true` はすべて（既定）、`false` はなし。ブローカーもセッションのトークンに同じ制限をかけ、Claude Code では `mcp__hb__<ツール>` を許可リストに入れる |
 | `runtime.permissions` | ACP の権限要求への答え方（`mode`、`allowKinds`）と、ハーネス側の許可・拒否リスト（`allowedTools`、`deniedTools`） |
 | `runtime.secrets` / `env` | 渡す秘密情報の環境変数名 / 秘密でない環境変数 |
+| `runtime.login` | `chatgpt`：ブローカーが持つ ChatGPT プランのログインを使う（Codex のみ。下の「Codex を ChatGPT プランで動かす」） |
 | `workspace.repo` / `ref` | clone するリポジトリとコミット SHA（ブランチ名は拒否） |
 | `workspace.strip` / `stripExtra` | 除去するファイル名のパターン（既定値は下記）/ その追加分 |
 | `network.mode` / `proxy` | `bridge` か `none` / 外向き通信を絞るためのプロキシ |
@@ -136,6 +137,28 @@ claude-agent-acp が `ANTHROPIC_API_KEY` をそのまま使えるかは実機で
 既定で除去するもの：`CLAUDE.md`、`CLAUDE.local.md`、`.claude`、`.mcp.json`、`AGENTS.md`、`AGENTS.override.md`、`.codex`、`GEMINI.md`、`.gemini`
 
 `limits.maxSpawnDepth` は、そのプロファイルのセッションがさらに何段下まで spawn できるかです（0 なら spawn 不可）。親の残りの深さとブローカー全体の `max_spawn_depth` も超えられません。
+
+## Codex を ChatGPT プランで動かす
+
+ChatGPT（Plus・Pro など）のプランで Codex のセッションを動かせます。API キーは要りません。
+
+```sh
+npm install -g @openai/codex                     # ホストの Codex CLI（ログインに使う）
+hb codex-login --config hb.yaml                  # ブラウザでログイン（--device-auth でデバイスコード）
+hb codex-login --status --config hb.yaml         # プランと有効期限の確認（トークンは表示しない）
+
+docker build -f images/codex/Dockerfile -t harness-broker/codex .
+docker inspect --format '{{.Id}}' harness-broker/codex   # → プロファイルの runtime.image
+cp profiles/examples/codex/*.yaml profiles/              # image と model を書き換える
+hb daemon --config hb.yaml
+```
+
+- **ログインはブローカーが持つ**：`hb codex-login` は、ふだんの `~/.codex` とは別のディレクトリ（`codex_login_dir`、既定 `<state_dir>/codex-login`）にログインします。ChatGPT のリフレッシュトークンは1回しか使えず、2か所で更新するとログインが無効になるため、ブローカーの外には出しません。
+- **セッションにはアクセス用の写しだけ**：`runtime.login: chatgpt` のセッションには、リフレッシュトークンを空にした `auth.json` を渡します。アクセストークンはログインからおよそ10日有効で、その間はセッションの中で更新は起きません。
+- **期限の確認**：アクセストークンの残りが、プロファイルの `maxRuntimeMinutes` に30分を足した時間より短いと、セッションを起動せずに失敗させます。そうなったら `hb codex-login` でログインし直してください。
+- **記録に残さない**：`auth.json` は実行履歴に回収しません。トークンの値は履歴に書く前に伏せます。
+- **承認なしで send を使える**：ブローカーのツールには MCP の注釈（`send` は破壊的でない・外部に出ない）を付けています。Codex は注釈のない MCP ツールには毎回承認を求めるためです。`permissions.mode: deny` のプロファイルは Codex を読み取り専用（`INITIAL_AGENT_MODE=read-only`）で動かし、ウェブ検索も切ります。
+- 使用量はそのアカウントのプランの上限に数えられます。
 
 ## 外部セッションをつなぐ
 
@@ -208,7 +231,7 @@ HB_TEST_DOCKER_IMAGE=$(docker inspect --format '{{.Id}}' hb-test-agent) python3 
 ## 未実装・未確認
 
 - **本物のハーネスでは未検証**：テストは偽の ACP エージェントで行っています。`claude-agent-acp` と `codex-acp` の版（Dockerfile の既定値）は公開情報から取ったもので、実機での確認が必要です。
-- **Codex の認証**：セッションごとに新しい `CODEX_HOME` を使うため、ログイン情報の渡し方が未確定です。
+- **Codex の実機確認**：ChatGPT プランのログインの受け渡し、codex-acp 2.2.2 との組み合わせ、注釈による承認の省略は、偽の ACP エージェントと Codex のソースで確かめただけです。ログインの自動更新（期限前にブローカーが更新する仕組み）もまだなく、期限が近づいたら `hb codex-login` でログインし直します。
 - **Gemini**：指示と skill のファイルは用意しますが、Gemini CLI への組み込みは未実装です。
 - **MCP Tasks**：`spawn` は Tasks 拡張ではなく、`wait` で起動完了まで待つか `status` で確認する方式です。
 - **外向き通信の制限**：`network.egress` は宣言だけです。実際に絞るには `network.proxy` にフィルタ付きプロキシを指定するか、`network.mode: none` にします。

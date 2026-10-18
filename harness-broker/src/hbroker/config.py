@@ -38,6 +38,13 @@ class BrokerConfig(BaseModel):
     max_sessions: int = 8
     max_spawn_depth: int = 2
     keep_bundles: bool = False
+    # The broker's own Codex login (a CODEX_HOME holding auth.json), used by
+    # profiles with runtime.login: chatgpt. Default: <state_dir>/codex-login.
+    codex_login_dir: Path | None = None
+
+    @property
+    def codex_login_path(self) -> Path:
+        return self.codex_login_dir or self.state_dir / "codex-login"
 
     @property
     def history_dir(self) -> Path:
@@ -69,6 +76,10 @@ def load_config(path: str | Path | None) -> BrokerConfig:
         cfg.profiles_dir = (path.parent / cfg.profiles_dir).resolve()
     if not cfg.state_dir.is_absolute():
         cfg.state_dir = (path.parent / cfg.state_dir).resolve()
+    if cfg.codex_login_dir is not None:
+        cfg.codex_login_dir = cfg.codex_login_dir.expanduser()
+        if not cfg.codex_login_dir.is_absolute():
+            cfg.codex_login_dir = (path.parent / cfg.codex_login_dir).resolve()
     return cfg
 
 

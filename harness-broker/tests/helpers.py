@@ -90,6 +90,39 @@ def make_module_repo(root: Path) -> tuple[Path, str]:
     return repo, git(repo, "rev-parse", "HEAD")
 
 
+def fake_jwt(claims: dict) -> str:
+    import base64
+
+    def enc(d: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.sig"
+
+
+FAKE_ACCESS_TOKEN_MARK = "access-secret-mark-1234567890"
+FAKE_REFRESH_TOKEN = "rt-refresh-secret-0987654321"
+
+
+def make_codex_login(login_dir: Path, expires_in: float = 10 * 86400) -> dict:
+    """An auth.json shaped like a Codex ChatGPT login."""
+    import time
+
+    login_dir.mkdir(parents=True, exist_ok=True)
+    auth = {
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "id_token": fake_jwt({"email": "me@example.com",
+                                  "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}}),
+            "access_token": fake_jwt({"exp": int(time.time() + expires_in), "mark": FAKE_ACCESS_TOKEN_MARK}),
+            "refresh_token": FAKE_REFRESH_TOKEN,
+            "account_id": "acct-1",
+        },
+        "last_refresh": "2026-10-18T00:00:00Z",
+    }
+    (login_dir / "auth.json").write_text(json.dumps(auth))
+    return auth
+
+
 def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST, adapter: list[str] | None = None,
                    module_repo: tuple[Path, str] | None = None) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +167,13 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
             "runtime": {**rt, "brokerTools": ["send", "receive"]},
             "limits": base["limits"],
         }
+        profiles["codexplan"] = {
+            "id": "codexplan", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "execution"},
+            "runtime": {**rt, "harness": "codex", "login": "chatgpt", "secrets": [],
+                        "permissions": {"mode": "deny"}},
+            "limits": base["limits"],
+        }
         profiles["notools"] = {
             "id": "notools", "version": "1.0.0",
             "module": {"local": str(mrepo), "path": "execution"},
@@ -163,7 +203,9 @@ class RunningBroker:
             docker={"network": "hb-test-net"},
             max_sessions=6,
             max_spawn_depth=2,
+            codex_login_dir=tmp / "codex-login",
         )
+        make_codex_login(tmp / "codex-login")
         self.broker = Broker(self.cfg)
         self.sockets = make_sockets(self.cfg, self.broker.manager.runner)
         self.url = self.cfg.local_url

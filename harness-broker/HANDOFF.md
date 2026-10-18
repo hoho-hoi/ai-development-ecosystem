@@ -16,7 +16,7 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 ## 現状
 
 - 実装は `src/hbroker/` にあり、構成と使い方は README.md のとおり。
-- テストは `cd tests && python3 -m unittest test_units test_e2e` で、52 件すべて通る（v0.4 時点）。
+- テストは `cd tests && python3 -m unittest test_units test_e2e` で、60 件すべて通る（v0.5 時点）。
 - Docker の通しテスト（`tests/test_docker.py`、手順は README）も通る。確認できたのは次の点。
   - エージェントが uid 10001・ケーパビリティなし・マウントなしで動く
   - ワークスペースから設定ファイルが除去されている
@@ -41,6 +41,16 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 - **`send` の `wait`**：v0.3 で廃止（`receive` に置き換え）。
 - **既存の試験用モジュールを移行**：akinator（branch `task/harness-broker`）と romaji-converter（同）。プロファイルの例は `profiles/examples/akinator*.yaml`、`romaji-converter.yaml`。偽の ACP エージェントで、ローカル参照とコミット固定の両方の通しの確認を済ませた。
 - 履歴のビューワーは、ユーザーから既存のビューワーを受け取ってから対応する。
+
+## v0.5 で変えたこと（2026-10-19）：Codex を ChatGPT プランで動かす
+
+ユーザーの依頼：GPT のサブスクリプションで実際に検証したい。Plus・Pro ではアクセストークン（`CODEX_ACCESS_TOKEN`、`at-…`）は作れない（Business・Enterprise のみ）ため、ChatGPT ログイン（`auth.json`）を使う。
+
+- **調べたこと**（Codex のソース 8c07694、codex-acp 2.2.2 のソース）：リフレッシュトークンは1回限り（再使用すると `refresh_token_reused`）。Codex が更新するのは、アクセストークンの期限まで5分を切ったとき（JWT の `exp`）。アクセストークンはおよそ10日有効。注釈のない MCP ツールは既定（Auto）で承認が要る。codex-acp は `NO_BROWSER` でブラウザログインを隠し、`INITIAL_AGENT_MODE` で承認と sandbox の組を選ぶ（既定の `agent` は Codex 自身の自動レビュー）。ウェブ検索の既定は `cached`（有効）。
+- **作ったもの**：`logins.py`（ブローカーのログインを読み、リフレッシュトークンを空にした写しを作る。期限が `maxRuntimeMinutes` + 30分より短ければ起動しない）、`runtime.login: chatgpt`、設定 `codex_login_dir`、`hb codex-login [--status] [--device-auth]`、Codex の `config.toml` に `cli_auth_credentials_store = "file"` と（deny なら）`web_search = "disabled"`、環境変数 `NO_BROWSER=1` と `INITIAL_AGENT_MODE`（deny → read-only、それ以外 → workspace-write）。収集した記録から `auth.json` を消す。トークンは履歴で伏せる。ブリッジのツールに MCP 注釈を付けた（send・receive・spawn は破壊的でない・外に出ない、terminate は破壊的、問い合わせは読み取りのみ）。
+- `images/codex/Dockerfile` の codex-acp を 2.2.2 にした（以前の 1.10.0 は誤り）。Codex 用のプロファイル例は `profiles/examples/codex/`（id は Claude 版と同じなので、どちらかを `profiles_dir` に置く）。
+- 未確認：実機での一連の動作（ここからは npm と Docker Hub に届かず、イメージを作れない）。model 名（例は `gpt-5.5`。プランで選べるものに合わせる）。ログインの自動更新は未実装（curie の例のように、ブローカーが `codex app-server` の `account/read {refreshToken: true}` で更新する案がある）。
+- テスト：`test_units` と `test_e2e` で 60 件、`test_docker` 2 件が通る。
 
 ## v0.4 で変えたこと（2026-10-19）：最後の文章に意味を持たせない
 
@@ -74,7 +84,7 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 
 1. **実機での確認**：`images/claude-code/Dockerfile` をビルドし、`profiles/examples/romaji-converter.yaml` の image を書き換えて、romaji-converter の `evaluations/run_examples.py` を通す（安い）。次に akinator の `evaluations/run_case.py` を上限を小さくして通す。キーは `ANTHROPIC_API_KEY`（だめなら `CLAUDE_CODE_OAUTH_TOKEN`）。あわせて `claude-agent-acp` の版と挙動、`deniedTools` が効くかを確認する。
 2. **外部の Claude Code**：`hb mcp --channel` で、Channels 経由で受信できるか確認する。
-3. **Codex**：`codex-acp` イメージを確認し、新しい `CODEX_HOME` での認証の渡し方を決める。
+3. **Codex（ChatGPT プラン）**：README の「Codex を ChatGPT プランで動かす」の手順で、romaji-converter → akinator の順に実機で通す。最初に見るのは、codex-acp が起動して `session/new` が通るか、モデルが send で返すか、send に承認が求められないか。
 4. **リポジトリへの組み込み**：このリポジトリの `Makefile` と CI に harness-broker のテストを入れる。CONTRIBUTING により `make test` が必須。
 5. **通信モデルの残り**（仕様書の未決事項）：作業を止めるメッセージの表し方、ハーネスのフックでの通知（すべてのツール呼び出しの切れ目）、通知に載せる内容。実機では、モデルが send で返すか（最後の文章で答えて終わらないか）と、`mcp__hb__send` の許可だけで claude-agent-acp が確認なしに send を使えるかを最初に見る。
 6. **残りの未実装**：MCP Tasks、外向き通信の制限（egress プロキシ）、Gemini への組み込み、起動後の設定検証（README の「未実装・未確認」も参照）。

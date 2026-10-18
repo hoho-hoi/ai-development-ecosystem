@@ -75,6 +75,17 @@ class DockerTests(BrokerCase):
         transcript = self.b.cfg.history_dir / "sessions" / sid / "harness" / "projects" / "transcript.jsonl"
         self.assertTrue(transcript.is_file())
 
+    async def test_codex_plan_login_in_container(self):
+        st = await self.b.tool("spawn", profile="codexplan", wait=True, wait_timeout=120)
+        self.assertEqual(st["state"], "idle", st)
+        _, r = await self.ask(st["id"], "CODEX_AUTH", wait=60)
+        seen = json.loads(r["body"])
+        self.assertEqual((seen["auth_file"], seen["refresh_token"]), (True, ""))
+        await self.b.tool("terminate", session=st["id"])
+        records = self.b.cfg.history_dir / "sessions" / st["id"] / "harness"
+        self.assertTrue(records.is_dir())
+        self.assertEqual(list(records.rglob("auth.json")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

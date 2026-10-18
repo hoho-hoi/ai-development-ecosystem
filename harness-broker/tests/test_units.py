@@ -4,10 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import FAKE_DIGEST, ROOT, make_module_repo, make_repo, write_profiles
+from helpers import FAKE_DIGEST, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo, write_profiles
 
 from hbroker.acp_client import decide_permission
 from hbroker.harness import prepare_harness_config, resolve_definition
+from hbroker.logins import LoginError, load_chatgpt_login, write_access_only
 from hbroker.modules import ModuleCache, load_local, read_spec
 from hbroker.profiles import DEFAULT_STRIP, Permissions, load_profile, profile_from_dict
 from hbroker.runner.docker import build_create_args, pack_bundle
@@ -325,6 +326,69 @@ class StoreTests(unittest.TestCase):
         data["runtime"]["messageFormat"] = "body"  # removed in v0.4
         with self.assertRaises(Exception):
             profile_from_dict(data, Path("."))
+
+class CodexLoginTests(unittest.TestCase):
+    def test_load_and_access_only_copy(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            make_codex_login(t / "login")
+            login = load_chatgpt_login(t / "login")
+            self.assertEqual((login.plan, login.email), ("plus", "me@example.com"))
+            path = write_access_only(login, t / "session")
+            copy = json.loads(path.read_text())
+            self.assertEqual(copy["tokens"]["refresh_token"], "")
+            self.assertEqual(copy["tokens"]["access_token"], login.auth["tokens"]["access_token"])
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(login.auth["tokens"]["refresh_token"], FAKE_REFRESH_TOKEN)  # original untouched
+            self.assertIn("codex:refresh_token", login.secrets)
+            self.assertNotIn("account_id", "".join(login.secrets))
+
+    def test_expiry_and_bad_logins(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            make_codex_login(t / "soon", expires_in=3600)
+            login = load_chatgpt_login(t / "soon")
+            login.check_fresh(10 * 60)  # 10 min run + 30 min margin < 1 h
+            with self.assertRaisesRegex(LoginError, "hb codex-login"):
+                login.check_fresh(45 * 60)
+            with self.assertRaisesRegex(LoginError, "no Codex login"):
+                load_chatgpt_login(t / "missing")
+            (t / "apikey").mkdir()
+            (t / "apikey" / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-x", "tokens": None}))
+            with self.assertRaisesRegex(LoginError, "not a ChatGPT login"):
+                load_chatgpt_login(t / "apikey")
+            (t / "noexp").mkdir()
+            (t / "noexp" / "auth.json").write_text(json.dumps({"tokens": {"access_token": fake_jwt({"sub": "x"})}}))
+            with self.assertRaisesRegex(LoginError, "no expiry"):
+                load_chatgpt_login(t / "noexp")
+
+    def test_codex_harness_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp", "login": "chatgpt",
+                                                   "permissions": {"mode": "deny"}}))
+            env = prepare_harness_config(p, Path(t), "/rt", "be brief", [])
+            conf = (Path(t) / "codex/config.toml").read_text()
+            self.assertIn('cli_auth_credentials_store = "file"', conf)
+            self.assertIn('web_search = "disabled"', conf)
+            self.assertEqual((env["NO_BROWSER"], env["INITIAL_AGENT_MODE"]), ("1", "read-only"))
+            allow = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp"}))
+            self.assertEqual(prepare_harness_config(allow, Path(t) / "b", "/rt", None, [])["INITIAL_AGENT_MODE"],
+                             "workspace-write")
+
+    def test_login_needs_codex(self):
+        with self.assertRaisesRegex(Exception, "needs runtime.harness: codex"):
+            profile_from_dict(minimal(runtime={"login": "chatgpt"}))
+
+    def test_bridge_tools_are_annotated(self):
+        from hbroker.bridge import TOOLS
+
+        ann = {t["name"]: t["annotations"] for t in TOOLS}
+        for name in ("send", "receive", "spawn"):
+            self.assertEqual((ann[name]["destructiveHint"], ann[name]["openWorldHint"]), (False, False), name)
+        self.assertTrue(ann["terminate"]["destructiveHint"])
+        for name in ("list_profiles", "list_sessions", "status", "history"):
+            self.assertTrue(ann[name]["readOnlyHint"], name)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,13 @@ import time
 import unittest
 from pathlib import Path
 
-from helpers import BRIDGE, RunningBroker, make_repo
+from helpers import (
+    BRIDGE,
+    FAKE_REFRESH_TOKEN,
+    RunningBroker,
+    make_codex_login,
+    make_repo,
+)
 
 SECRET = "hb-secret-value-123456"
 
@@ -332,6 +338,48 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual([m["reply_to"] for m in got], [quick["message_id"]])
 
 
+class CodexLoginTests(BrokerCase):
+    """runtime.login: chatgpt — sessions get an access-only copy of the
+    broker's plan login; the refresh token never leaves the broker."""
+
+    async def test_session_gets_access_only_copy(self):
+        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        self.assertEqual(st["state"], "idle", st)
+        _, r = await self.ask(st["id"], "CODEX_AUTH")
+        seen = json.loads(r["body"])
+        self.assertTrue(seen["auth_file"])
+        self.assertTrue(seen["has_access_token"])
+        self.assertEqual(seen["refresh_token"], "")  # blanked
+        self.assertIn('cli_auth_credentials_store = "file"', seen["config"])
+        self.assertIn('web_search = "disabled"', seen["config"])
+        self.assertEqual(seen["env"], {"NO_BROWSER": "1", "INITIAL_AGENT_MODE": "read-only"})
+        login = (await self.b.tool("history", session=st["id"], kinds=["session.login"]))["events"][0]["payload"]
+        self.assertEqual((login["login"], login["plan"]), ("chatgpt", "plus"))
+        # the broker's own login is untouched
+        own = json.loads((self.b.cfg.codex_login_path / "auth.json").read_text())
+        self.assertEqual(own["tokens"]["refresh_token"], FAKE_REFRESH_TOKEN)
+
+        await self.b.tool("terminate", session=st["id"])
+        records = self.b.cfg.history_dir / "sessions" / st["id"] / "harness"
+        self.assertTrue((records / "projects" / "transcript.jsonl").is_file())
+        self.assertEqual(list(records.rglob("auth.json")), [])  # never collected
+        everything = "".join(f.read_text() for f in (self.b.cfg.history_dir / "events").glob("*.jsonl"))
+        self.assertNotIn(FAKE_REFRESH_TOKEN, everything)
+        self.assertNotIn(own["tokens"]["access_token"], everything)
+
+    async def test_session_refused_when_login_would_expire(self):
+        make_codex_login(self.b.cfg.codex_login_path, expires_in=600)  # 10 min left, run may take 5 min + margin
+        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        self.assertEqual(st["state"], "failed", st)
+        self.assertIn("hb codex-login", st["end_reason"])
+
+    async def test_session_refused_without_login(self):
+        (self.b.cfg.codex_login_path / "auth.json").unlink()
+        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        self.assertEqual(st["state"], "failed", st)
+        self.assertIn("no Codex login", st["end_reason"])
+
+
 class PolicyTests(BrokerCase):
     async def register(self, name="ext"):
         code, body = await self.b.post("/api/register", {"name": name, "harness": "codex"})
@@ -394,7 +442,14 @@ class BridgeTests(BrokerCase):
                 )
                 res = await client.call_tool("list_profiles", {})
                 profiles = json.loads(res.content[0].text)["profiles"]
-                self.assertEqual(sorted(p["id"] for p in profiles), ["echo", "locked", "modlocal", "modrepo", "notools"])
+                self.assertEqual(
+                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "notools"]
+                )
+                # annotations let harnesses call the messaging tools without asking
+                listed = {t.name: t.annotations for t in (await client.list_tools()).tools}
+                self.assertEqual((listed["send"].destructive_hint, listed["send"].open_world_hint), (False, False))
+                self.assertTrue(listed["terminate"].destructive_hint)
+                self.assertTrue(listed["history"].read_only_hint)
 
                 res = await client.call_tool("spawn", {"profile": "echo", "task": "via bridge"})
                 self.assertFalse(res.is_error, res.content)

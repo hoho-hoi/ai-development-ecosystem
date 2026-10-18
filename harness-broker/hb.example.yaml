@@ -21,3 +21,7 @@ max_sessions: 8          # live managed sessions
 max_spawn_depth: 2       # levels of spawning below the operator / an external session
 
 keep_bundles: false      # keep each session's prepared workspace after it ends
+
+# The broker's own ChatGPT plan login for Codex sessions (runtime.login: chatgpt).
+# Create it with `hb codex-login --config hb.yaml`. Default: <state_dir>/codex-login
+# codex_login_dir: ~/.local/state/harness-broker/codex-login

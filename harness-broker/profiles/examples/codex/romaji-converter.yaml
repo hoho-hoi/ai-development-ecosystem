@@ -1,0 +1,23 @@
+# Romaji -> Japanese converter on Codex, using the broker's ChatGPT plan login.
+# Setup: see akinator.yaml in this directory.
+id: romaji-converter
+version: 2.0.0
+module:
+  repo: https://github.com/ysgrProgramming/romaji-converter.git
+  ref: 802842acd7920de511cb8d20b7101bdc04f7b48a
+  path: execution
+spawnableBy: [external, "*"]
+runtime:
+  harness: codex
+  adapter: codex-acp
+  model: gpt-5.5
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  login: chatgpt
+  sessionMode: per_message   # each conversion is independent
+  brokerTools: [send]        # sends the conversion back with send
+  permissions:
+    mode: deny
+limits:
+  maxRuntimeMinutes: 30
+  maxSpawnDepth: 0
+  maxConcurrent: 4

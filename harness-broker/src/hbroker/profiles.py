@@ -111,12 +111,21 @@ class Runtime(_Model):
     # environment (never their values in argv or history).
     secrets: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    # chatgpt: the session uses the broker's ChatGPT plan login (Codex only);
+    # it gets an access-only copy, never the refresh token (see logins.py).
+    login: Literal["chatgpt"] | None = None
     # persistent:  one conversation for the whole session.
     # per_message: every message starts a fresh conversation (same container).
     session_mode: Literal["persistent", "per_message"] = Field(default="persistent", alias="sessionMode")
     # The broker tools the agent gets: true (all), false (none) or a list.
     # The broker enforces the same list for the session's token.
     broker_tools: list[str] = Field(default_factory=lambda: list(BROKER_TOOLS), alias="brokerTools")
+
+    @model_validator(mode="after")
+    def _login_harness(self) -> "Runtime":
+        if self.login == "chatgpt" and self.harness != "codex":
+            raise ValueError("runtime.login: chatgpt needs runtime.harness: codex")
+        return self
 
     @field_validator("broker_tools", mode="before")
     @classmethod

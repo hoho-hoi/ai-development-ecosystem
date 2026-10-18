@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 # Handshake-era MCP versions this server speaks. Clients that probe the
 # stateless 2026-07-28 era with server/discover get "method not found" and
 # fall back to initialize.
@@ -130,6 +130,23 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+# MCP tool annotations. Harnesses use them to decide whether a call needs the
+# user's approval (Codex asks for every tool without them), so they must say
+# what is true: everything talks only to the broker (closed world), nothing
+# but terminate destroys anything, and the queries only read.
+_CLOSED = {"openWorldHint": False}
+ANNOTATIONS: dict[str, dict[str, Any]] = {
+    "send": {"title": "Send a message", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, **_CLOSED},
+    "receive": {"title": "Receive messages", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, **_CLOSED},
+    "list_profiles": {"title": "List profiles", "readOnlyHint": True, **_CLOSED},
+    "spawn": {"title": "Start a session", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, **_CLOSED},
+    "list_sessions": {"title": "List sessions", "readOnlyHint": True, **_CLOSED},
+    "status": {"title": "Session status", "readOnlyHint": True, **_CLOSED},
+    "terminate": {"title": "Stop a session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, **_CLOSED},
+    "history": {"title": "Execution history", "readOnlyHint": True, **_CLOSED},
+}
+for _tool in TOOLS:
+    _tool["annotations"] = ANNOTATIONS[_tool["name"]]
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 

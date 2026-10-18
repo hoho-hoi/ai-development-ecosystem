@@ -71,7 +71,13 @@ def prepare_harness_config(
     elif rt.harness == "codex":
         d = host_dir / "codex"
         (d / "skills").mkdir(parents=True)
-        lines = [f"model = {json.dumps(rt.model)}"]
+        lines = [
+            f"model = {json.dumps(rt.model)}",
+            # Credentials live in $CODEX_HOME/auth.json, never an OS keyring.
+            'cli_auth_credentials_store = "file"',
+        ]
+        if rt.permissions.mode == "deny":
+            lines.append('web_search = "disabled"')
         if instructions is not None:
             (d / "AGENTS.md").write_text(instructions, encoding="utf-8")
         else:
@@ -80,6 +86,11 @@ def prepare_harness_config(
         _copy_skills(skill_dirs, d / "skills")
         (d / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         env["CODEX_HOME"] = f"{runtime_dir}/codex"
+        # codex-acp: no browser login offered; approvals go to the broker
+        # (read-only for deny profiles, workspace writes otherwise), not to
+        # Codex's own auto reviewer.
+        env["NO_BROWSER"] = "1"
+        env["INITIAL_AGENT_MODE"] = "read-only" if rt.permissions.mode == "deny" else "workspace-write"
     else:
         # gemini / custom: files are staged, wiring them in is up to the image.
         d = host_dir / rt.harness
@@ -101,6 +112,10 @@ def resolve_definition(profile: Profile, cache: "ModuleCache") -> tuple[str | No
         mod = cache.resolve(profile.module, base)
         return mod.instructions_text(), mod.skill_dirs(), mod.manifest()
     return profile.instructions_text(), profile.skill_dirs(), None
+
+
+# Files in a harness dir that hold credentials: never collected into history.
+CREDENTIAL_FILES = {"codex": ("auth.json",)}
 
 
 def harness_record_dir(profile: Profile) -> str:

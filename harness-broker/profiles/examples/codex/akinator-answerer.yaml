@@ -1,0 +1,27 @@
+# Akinator answerer on Codex, using the broker's ChatGPT plan login.
+# Same module as ../akinator.yaml; only the runtime differs.
+#   1. hb codex-login --config hb.yaml          (once; again before it expires)
+#   2. docker build -f images/codex/Dockerfile -t harness-broker/codex .
+#      docker inspect --format '{{.Id}}' harness-broker/codex   -> runtime.image
+#   3. set runtime.model to a model your plan offers (see /model in codex)
+id: akinator-answerer
+version: 2.0.0
+module:
+  repo: https://github.com/ysgrProgramming/akinator.git
+  ref: e7765973892141361c886dd511e6d62e759154b9
+  path: requirements/answerer
+spawnableBy: [external]
+runtime:
+  harness: codex
+  adapter: codex-acp
+  model: gpt-5.5
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  login: chatgpt             # access-only copy of the broker's plan login
+  sessionMode: per_message   # every question in a fresh conversation
+  brokerTools: [send]        # answers each question with send
+  permissions:
+    mode: deny               # read-only Codex; every approval request is refused
+limits:
+  maxRuntimeMinutes: 60
+  maxSpawnDepth: 0
+  maxConcurrent: 4
