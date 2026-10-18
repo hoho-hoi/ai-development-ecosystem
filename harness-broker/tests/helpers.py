@@ -199,10 +199,10 @@ class RunningBroker:
     async def post(self, path: str, body: dict[str, Any], token: str | None = None, timeout: float = 60) -> tuple[int, Any]:
         return await asyncio.to_thread(self._post_sync, path, body, token or self.broker.key, timeout)
 
-    async def tool(self, name: str, token: str | None = None, **args: Any) -> Any:
-        code, body = await self.post(f"/api/tools/{name}", args, token, timeout=args.get("wait", 0) + 120)
+    async def tool(self, tool_name: str, token: str | None = None, /, **args: Any) -> Any:
+        code, body = await self.post(f"/api/tools/{tool_name}", args, token, timeout=args.get("wait", 0) + 120)
         if code != 200:
-            raise AssertionError(f"{name} -> {code}: {body}")
+            raise AssertionError(f"{tool_name} -> {code}: {body}")
         return body
 
     def bridge_env(self, **extra: str) -> dict[str, str]:

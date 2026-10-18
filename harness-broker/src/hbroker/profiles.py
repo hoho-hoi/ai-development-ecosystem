@@ -114,7 +114,7 @@ class Runtime(_Model):
     # persistent:  one conversation for the whole session.
     # per_message: every message starts a fresh conversation (same container).
     session_mode: Literal["persistent", "per_message"] = Field(default="persistent", alias="sessionMode")
-    # Give the agent the broker's MCP tools (spawn, send, inbox, ...).
+    # Give the agent the broker's MCP tools (spawn, send, receive, ...).
     broker_tools: bool = Field(default=True, alias="brokerTools")
 
     @field_validator("adapter", mode="before")

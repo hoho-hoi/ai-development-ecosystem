@@ -4,6 +4,10 @@ Every event is appended, unabridged, to a JSON-lines file per day
 (events/YYYY-MM-DD.jsonl); SQLite holds a searchable index of the same events
 plus the session and message tables. The JSONL files are the record of truth
 and are never rewritten.
+
+The message table is also every session's mailbox: a message is unread until
+delivered_at is set, either when it starts a turn ("turn") or when the
+recipient takes it with receive ("receive").
 """
 
 from __future__ import annotations
@@ -57,7 +61,8 @@ CREATE TABLE IF NOT EXISTS messages (
     body TEXT NOT NULL,
     idempotency_key TEXT,
     delivery TEXT NOT NULL,
-    delivered_at TEXT
+    delivered_at TEXT,
+    origin TEXT NOT NULL DEFAULT 'send'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(from_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS messages_inbox ON messages(to_id, delivered_at, ts);
@@ -77,6 +82,9 @@ class HistoryStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(messages)")}
+        if "origin" not in cols:  # state dirs from v0.2
+            self.db.execute("ALTER TABLE messages ADD COLUMN origin TEXT NOT NULL DEFAULT 'send'")
         self._secrets: dict[str, str] = {}
 
     # --- redaction -------------------------------------------------------
@@ -213,11 +221,13 @@ class HistoryStore:
         return dict(r) if r else None
 
     def insert_message(self, msg: dict[str, Any]) -> None:
+        """origin: "send" (the send tool), "final" (a turn's final text taken
+        as the reply), "notice" (written by the broker)."""
         with self._lock:
             self.db.execute(
-                "INSERT INTO messages(id, ts, from_id, to_id, thread_id, reply_to, body, idempotency_key, delivery) "
-                "VALUES (:id, :ts, :from_id, :to_id, :thread_id, :reply_to, :body, :idempotency_key, :delivery)",
-                msg,
+                "INSERT INTO messages(id, ts, from_id, to_id, thread_id, reply_to, body, idempotency_key, delivery, origin) "
+                "VALUES (:id, :ts, :from_id, :to_id, :thread_id, :reply_to, :body, :idempotency_key, :delivery, :origin)",
+                {"origin": "send", **msg},
             )
 
     def message(self, message_id: str) -> dict[str, Any] | None:
@@ -225,16 +235,39 @@ class HistoryStore:
             r = self.db.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
         return dict(r) if r else None
 
-    def mark_delivered(self, message_id: str) -> None:
+    def mark_delivered(self, message_id: str, via: str) -> None:
         with self._lock:
-            self.db.execute("UPDATE messages SET delivered_at = ? WHERE id = ?", (now(), message_id))
+            self.db.execute(
+                "UPDATE messages SET delivered_at = ?, delivery = ? WHERE id = ?", (now(), via, message_id)
+            )
 
-    def undelivered(self, to_id: str) -> list[dict[str, Any]]:
+    def unread(
+        self, to_id: str, *, from_id: str | None = None, reply_to: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM messages WHERE to_id = ? AND delivered_at IS NULL"
+        args: list[Any] = [to_id]
+        if from_id:
+            sql += " AND from_id = ?"
+            args.append(from_id)
+        if reply_to:
+            sql += " AND reply_to = ?"
+            args.append(reply_to)
+        sql += " ORDER BY ts, rowid"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        with self._lock:
+            rows = self.db.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def unread_by_sender(self, to_id: str) -> list[tuple[str, int]]:
+        """[(from_id, count)] of unread messages, oldest sender first."""
         with self._lock:
             rows = self.db.execute(
-                "SELECT * FROM messages WHERE to_id = ? AND delivered_at IS NULL ORDER BY ts", (to_id,)
+                "SELECT from_id, COUNT(*) AS n, MIN(ts) AS first FROM messages "
+                "WHERE to_id = ? AND delivered_at IS NULL GROUP BY from_id ORDER BY first",
+                (to_id,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [(r["from_id"], int(r["n"])) for r in rows]
 
     def close(self) -> None:
         with self._lock:

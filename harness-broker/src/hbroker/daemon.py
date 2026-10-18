@@ -3,6 +3,9 @@
 The MCP surface is the stdio bridge (bridge.py) that each session runs; the
 bridge forwards every tool call here as POST /api/tools/<tool> with the
 session's bearer token. The operator authenticates with the broker key.
+
+Every tool response except receive carries an X-HB-Unread header when the
+caller has unread messages: JSON {"count": n, "from": [{session, name, count}]}.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import json
 import logging
 import socket
 from typing import Any, AsyncIterator
@@ -36,8 +40,8 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_profiles": (set(), set()),
     "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout"}, {"profile"}),
-    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key", "auto_reply", "wait"}, {"to", "body"}),
-    "inbox": ({"wait"}, set()),
+    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key"}, {"to", "body"}),
+    "receive": ({"from", "reply_to", "wait"}, set()),
     "list_sessions": ({"profile", "state", "include_ended"}, set()),
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
@@ -134,11 +138,11 @@ class Broker:
                 thread_id=args.get("thread_id"),
                 reply_to=args.get("reply_to"),
                 idempotency_key=args.get("idempotency_key"),
-                auto_reply=bool(args.get("auto_reply", True)),
-                wait=float(args.get("wait") or 0),
             )
-        if tool == "inbox":
-            return {"messages": await m.inbox(caller, wait=float(args.get("wait", 0)))}
+        if tool == "receive":
+            return await m.receive(
+                caller, from_ref=args.get("from"), reply_to=args.get("reply_to"), wait=float(args.get("wait") or 0)
+            )
         if tool == "list_sessions":
             return {
                 "sessions": m.list_sessions(
@@ -209,10 +213,15 @@ class Broker:
                 raise BrokerError(f"unknown argument(s) for {tool}: {sorted(unknown)}")
             if missing:
                 raise BrokerError(f"missing argument(s) for {tool}: {sorted(missing)}")
-            if tool != "inbox":
+            if tool != "receive":  # polling noise; what was received is in message.deliver
                 self.store.record("api.call", session_id=caller.id, tool=tool, args=args)
             result = await self.call_tool(caller, tool, args)
-            return JSONResponse(result)
+            headers = {}
+            if tool != "receive":
+                notice = self.manager.unread_notice(caller)
+                if notice:
+                    headers["X-HB-Unread"] = json.dumps(notice)  # ASCII-only, safe as a header
+            return JSONResponse(result, headers=headers)
         except BrokerError as e:
             return JSONResponse({"error": str(e)}, status_code=e.status)
         except (KeyError, ValueError, TypeError) as e:

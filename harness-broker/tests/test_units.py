@@ -288,6 +288,35 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(states, {"a": "lost", "b": "terminated"})
             st.close()
 
+    def test_mailbox_filters_and_v02_migration(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as t:
+            # a v0.2 index: messages without the origin column, one unread row
+            db = sqlite3.connect(Path(t) / "index.sqlite3")
+            db.execute(
+                "CREATE TABLE messages (id TEXT PRIMARY KEY, ts TEXT NOT NULL, from_id TEXT NOT NULL, "
+                "to_id TEXT NOT NULL, thread_id TEXT NOT NULL, reply_to TEXT, body TEXT NOT NULL, "
+                "idempotency_key TEXT, delivery TEXT NOT NULL, delivered_at TEXT)"
+            )
+            db.execute("INSERT INTO messages VALUES ('m0','2026-01-01T00:00:00','a','me','t','', 'old', NULL, 'inbox', NULL)")
+            db.commit()
+            db.close()
+            st = HistoryStore(t)
+            self.assertEqual(st.unread("me")[0]["origin"], "send")
+            row = {"to_id": "me", "thread_id": "t", "idempotency_key": None, "delivery": "mailbox"}
+            st.insert_message({**row, "id": "m1", "ts": "2026-01-02", "from_id": "a", "reply_to": None, "body": "1"})
+            st.insert_message({**row, "id": "m2", "ts": "2026-01-03", "from_id": "b", "reply_to": "m9", "body": "2", "origin": "final"})
+            st.insert_message({**row, "id": "m3", "ts": "2026-01-04", "from_id": "a", "reply_to": None, "body": "3"})
+            self.assertEqual([m["id"] for m in st.unread("me", from_id="a")], ["m0", "m1", "m3"])
+            self.assertEqual([m["id"] for m in st.unread("me", reply_to="m9")], ["m2"])
+            self.assertEqual([m["id"] for m in st.unread("me", limit=1)], ["m0"])
+            self.assertEqual(st.unread_by_sender("me"), [("a", 3), ("b", 1)])
+            st.mark_delivered("m2", "receive")
+            self.assertEqual(st.message("m2")["delivery"], "receive")
+            self.assertEqual(st.unread_by_sender("me"), [("a", 3)])
+            st.close()
+
 
 if __name__ == "__main__":
     unittest.main()

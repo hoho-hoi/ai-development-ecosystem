@@ -10,7 +10,12 @@ is "echo: <body>", except for these bodies:
     MCP                reply with the mcpServers it was given
     BRIDGE <tool> <json>
                        start the first MCP server it was given (the broker
-                       bridge), call that tool, reply with the tool result
+                       bridge), call that tool, reply with the tool result;
+                       "$MSG" in the JSON becomes the id of the message that
+                       started the turn (envelope format only)
+    DELAY <s> <body>   wait s seconds, then handle <body>
+    SILENT             end the turn without any text
+    TOOLCALL           write narration, report a tool call, then the answer
     CRASH              exit with code 3
 Every prompt is appended to a transcript under $CLAUDE_CONFIG_DIR (or
 $CODEX_HOME), standing in for the harness's own session records.
@@ -46,6 +51,23 @@ def transcript(entry):
     d.mkdir(parents=True, exist_ok=True)
     with open(d / "transcript.jsonl", "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def message_id_of(text):
+    for line in text.split("\n"):
+        if line.startswith("message_id: "):
+            return line[len("message_id: "):]
+    return ""
+
+
+def chunk(sid, text):
+    write(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}},
+        }
+    )
 
 
 def body_of(text):
@@ -112,6 +134,9 @@ def handle_prompt(rid, params):
     state["prompts"][sid] = state["prompts"].get(sid, 0) + 1
     body = body_of(text)
     transcript({"prompt": text})
+    while body.startswith("DELAY "):
+        _, secs, body = body.split(" ", 2)
+        time.sleep(float(secs))
     if body.startswith("SLEEP "):
         time.sleep(float(body.split()[1]))
         reply = "echo: " + body
@@ -153,22 +178,26 @@ def handle_prompt(rid, params):
         reply = json.dumps(state["mcp"])
     elif body.startswith("BRIDGE "):
         _, tool, raw = body.split(" ", 2)
-        reply = json.dumps(call_bridge(tool, json.loads(raw)))
-    elif body == "CRASH":
-        sys.exit(3)
-    else:
-        reply = "echo: " + body
-    for chunk in (reply[: len(reply) // 2], reply[len(reply) // 2 :]):
+        reply = json.dumps(call_bridge(tool, json.loads(raw.replace("$MSG", message_id_of(text)))))
+    elif body == "SILENT":
+        reply = ""
+    elif body == "TOOLCALL":
+        chunk(sid, "Let me look that up.")
         write(
             {
                 "jsonrpc": "2.0",
                 "method": "session/update",
-                "params": {
-                    "sessionId": sid,
-                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}},
-                },
+                "params": {"sessionId": sid, "update": {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "lookup", "kind": "read", "status": "pending"}},
             }
         )
+        reply = "the answer is 42"
+    elif body == "CRASH":
+        sys.exit(3)
+    else:
+        reply = "echo: " + body
+    if reply:
+        for part in (reply[: len(reply) // 2], reply[len(reply) // 2 :]):
+            chunk(sid, part)
     transcript({"reply": reply})
     write({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
