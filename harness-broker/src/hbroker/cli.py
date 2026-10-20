@@ -1,6 +1,7 @@
 """`hb` command line.
 
-    hb daemon   [--config hb.yaml]           run the broker
+    hb daemon   [--config hb.yaml]           run this machine's place
+    hb place    [--config hb.yaml]           show this place's name and key, as a peer entry for other places
     hb mcp      [bridge options]             run the stdio MCP bridge (for a harness's MCP config)
     hb profiles [--config hb.yaml] [FILE…]   validate profiles and show their fingerprints
     hb call TOOL [JSON] [--config hb.yaml]   call a broker tool as the operator
@@ -51,6 +52,25 @@ def _cmd_profiles(a: argparse.Namespace) -> None:
             ok = False
             print(f"ERROR {name}: {err}")
     sys.exit(0 if ok else 1)
+
+
+def _cmd_place(a: argparse.Namespace) -> None:
+    """Who this place is. Paste the printed entry into the `peers` list of
+    every place that should talk to this one, and theirs into this one's."""
+    from .identity import load_or_create_key
+
+    cfg = load_config(a.config)
+    key = load_or_create_key(cfg.place_key_file)
+    url = cfg.public_url or cfg.local_url
+    print(f"# place {cfg.place}: add this to the peers of the places it talks to")
+    print("peers:")
+    print(f"  - name: {cfg.place}")
+    print(f"    url: {url}")
+    print(f"    public_key: {key.public_hex}")
+    if not cfg.public_url:
+        print(f"# (url is the local one; set public_url to the address other machines reach this one at)")
+    if cfg.peers:
+        print(f"# this place trusts: {', '.join(p.name for p in cfg.peers)}")
 
 
 def _cmd_call(a: argparse.Namespace) -> None:
@@ -115,14 +135,17 @@ def main(argv: list[str] | None = None) -> None:
 
     ap = argparse.ArgumentParser(prog="hb", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("daemon", help="run the broker")
+    p = sub.add_parser("daemon", help="run this machine's place")
     p.add_argument("--config", type=Path)
     p.set_defaults(fn=_cmd_daemon)
+    p = sub.add_parser("place", help="show this place's name and key (a peer entry for other places)")
+    p.add_argument("--config", type=Path)
+    p.set_defaults(fn=_cmd_place)
     p = sub.add_parser("profiles", help="validate profiles")
     p.add_argument("--config", type=Path)
     p.add_argument("files", nargs="*")
     p.set_defaults(fn=_cmd_profiles)
-    p = sub.add_parser("call", help="call a broker tool as the operator")
+    p = sub.add_parser("call", help="call a tool as the operator")
     p.add_argument("tool")
     p.add_argument("json", nargs="?")
     p.add_argument("--config", type=Path)

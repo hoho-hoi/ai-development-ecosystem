@@ -7,21 +7,24 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 ハーネス（Claude Code、Codex など）を抽象化し、次のことを MCP 経由でできるようにする。
 
 - プロファイルからセッションを起動する
-- セッション同士で送受信する
+- セッション同士で送受信する（別のマシンにいるセッションとも）
 
 プロファイルから生まれるセッションは隔離コンテナで動かし、ホストやプロジェクトの設定・skill を読ませない（再現性のため）。実行履歴は送信原文まで残す。
 
-仕様書（ドラフト。v0.4 で一から書き直した）：https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514
+v0.6 からは、セッションを「人」、マシンごとのデーモンを「場所」として扱う。中心のハブは置かない。
+
+仕様書（ドラフト。v0.4 で一から書き直し、v0.6 で人と場所の構成にした）：https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514
 
 ## 現状
 
 - 実装は `src/hbroker/` にあり、構成と使い方は README.md のとおり。
-- テストは `cd tests && python3 -m unittest test_units test_e2e` で、60 件すべて通る（v0.5 時点）。
-- Docker の通しテスト（`tests/test_docker.py`、手順は README）も通る。確認できたのは次の点。
+- テストは `cd tests && python3 -m unittest test_units test_e2e test_places` で、80 件すべて通る（v0.6 時点）。
+- Docker の通しテスト（`tests/test_docker.py`、手順は README）の 3 件も通る。確認できたのは次の点。
   - エージェントが uid 10001・ケーパビリティなし・マウントなしで動く
   - ワークスペースから設定ファイルが除去されている
   - コンテナからブリッジ経由でブローカーに接続できる
   - 終了時に記録を回収し、コンテナを削除する
+  - コンテナで動いているセッションをクローンでき、記憶とワークスペースを引き継ぐ
 - テストはすべて偽の ACP エージェント（`tests/fake_acp_agent.py`）で行った。本物の Claude Code・Codex ではまだ動かしていない。
 
 ## 決めたこと
@@ -31,8 +34,24 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 - **MCP ブリッジ（`bridge.py`）は標準ライブラリだけで自作**：Claude Code Channels の通知（`notifications/claude/channel`）を任意のタイミングで送るため。公式 MCP SDK のクライアントで動作確認済み。
 - **ワークスペースはホスト側で作る**：固定コミットから clone し、設定ファイルを除去してから tar でコンテナに `docker cp` する。ホストのディレクトリはマウントしない。
 - **配送の方式**：v0.3 で作り直した（下記）。
-- **履歴の閲覧権限**：操作者はすべて読める。セッションが読めるのは、自分、自分が起動したセッション、自分が参加したスレッドだけ。
-- **待ち受け先**：docker ランナーでは、ブローカーは 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。
+- **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
+- **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
+
+## v0.6 で変えたこと（2026-10-21）：人と場所
+
+ユーザーの考え：ハブを1つ作るより、セッションごとにサーバーを立てて通信するほうが合理的（大元をどこに置くかの問題がなく、別マシンでの起動も自然にできる）。セッションを人間と捉えたい。人間を全員操り人形にはできない。現実と違うのは、必要な人をその都度作れ、不要ならすぐ消せ、同じ人からいくらでもクローンを作れ、それぞれが考えていることに自由にアクセスできること。「セッション単位は言い過ぎかもしれない」とのことで、サーバーはマシンごと（場所）にし、人ごとに鍵・住所・受信箱を持たせる形を提案して了承を得た。考えを読めるのは、ユーザーに加えて全セッション。
+
+- **場所**（`federation.py`、`identity.py`）：マシンごとの `hb daemon`。名前（`place`）、Ed25519 の鍵（`<state_dir>/place.key`）、信頼する場所の一覧（`peers`：名前・URL・公開鍵）を持つ。場所どうしの要求は `X-HB-Place`・`X-HB-Time`・`X-HB-Signature`（メソッド・パス・時刻・本文の SHA-256 への署名）で認証し、時刻のずれは 300 秒まで。エンドポイントは `/federation/deliver`（メッセージ）、`/federation/quiet`（相手が黙るまで待つ）、`/federation/call`（ツールの代理呼び出し）。第三の場所への中継はしない。`hb place` で他の場所に貼る peers の項目を表示する。
+- **人**：どのセッションも鍵を持ち、id は `s-` + SHA-256(公開鍵) の先頭16桁（自己証明）。住所は `id@場所`。秘密鍵は場所が持ち、コンテナには渡さない。操作者の id は `operator` のままで、場所の鍵で署名する。
+- **署名付きメッセージ**：送信者の鍵で id・from・to・thread_id・reply_to・body・sent_at に署名する。受け取る場所は、from の場所が届けた場所と同じか、公開鍵が id と合うか、署名が正しいかを確かめる（操作者なら peers の場所の鍵で確かめる）。`messages` 表に `from_name` と `sig` の列を足した（古い索引には自動で足す）。from_id は住所、to_id は住人の id（自分の住人が外に送った写しは相手の住所）。
+- **別の場所へのツール**：`spawn` と `list_profiles`・`list_sessions` に `place`、`status`・`terminate`・`clone`・`history` は `id@場所` で別の場所に回す。別の場所での spawn は task なしで起動し、task は呼び出した人からの署名付きメッセージとして送る。親は住所で記録し、`spawnableBy` の役割（operator・external・プロファイル id）と深さも場所をまたいで引き継ぐ。別の場所の操作者はこちらでも操作者。
+- **receive(from=別の場所の人)**：郵便は自分の受信箱に届く。黙ったかどうかは、待っている間、相手の場所に `/federation/quiet` で長めに問い合わせる。名前で指定したら相手の場所の `status` で id にする。
+- **clone**：元の人のワークスペースをその時点で写し（`Runner.snapshot_workspace`）、ハーネスの記録を回収して（`auth.json` は除く）、新しいコンテナで ACP `session/load` によって会話を再開する。指示・設定・skill はプロファイルから作り直し、記録だけ上書きしないよう重ねる。`loadSession` のないハーネスでは失敗させる。per_message のプロファイルはワークスペースだけ写す。起動の可否は spawn と同じ規則。
+- **開かれた履歴**：閲覧制限をなくし、`history` に `wait`（最大 600 秒、新しい記録が出たら返る）を足した。別の場所の人の履歴はその場所から取る。
+- ブリッジ 0.6.0：`clone` ツール、`place` 引数、`history` の `wait`、指示に住所とクローンと開かれた履歴を書いた。名前に `@` は使えない（`-` に置き換える）。
+- 偽エージェント：`session/load`（記録から記憶を戻す）、`REMEMBER`・`MEMORY`・`WRITE`・`READ`。ほかのエージェントの `echo:` には返さない（偽エージェントどうしが永遠に言い返さないように）。
+- テスト：`test_places.py`（同じプロセスで pc1 と pc2 を動かす。場所をまたぐ会話・黙った検知・ツール・spawn の規則・偽造や未知の場所や古い要求の拒否・中継の拒否・クローン・開かれた履歴と追従）。`test_units` 40 件、`test_e2e` 27 件、`test_places` 13 件、`test_docker` 3 件（コンテナでのクローンを追加）が通る。Docker Hub に届かないので、テスト用イメージは v5 の上に新しいファイルを重ねて作った。
+- 未確認：別々のマシンでの通信。本物のハーネスでの `session/load`（ローカルランナーでは作業ディレクトリの絶対パスが変わるので、Claude Code は記録を見つけられないかもしれない）。
 
 ## v0.2 で追加したこと（2026-10-17）
 
@@ -82,11 +101,12 @@ Claude アプリのセッションで作った v0.1 を、Claude Code で続け�
 
 ## 次にやること（優先順）
 
-1. **実機での確認**：`images/claude-code/Dockerfile` をビルドし、`profiles/examples/romaji-converter.yaml` の image を書き換えて、romaji-converter の `evaluations/run_examples.py` を通す（安い）。次に akinator の `evaluations/run_case.py` を上限を小さくして通す。キーは `ANTHROPIC_API_KEY`（だめなら `CLAUDE_CODE_OAUTH_TOKEN`）。あわせて `claude-agent-acp` の版と挙動、`deniedTools` が効くかを確認する。
+1. **実機での確認**（v0.6 の場所とクローンも）：`images/claude-code/Dockerfile` をビルドし、`profiles/examples/romaji-converter.yaml` の image を書き換えて、romaji-converter の `evaluations/run_examples.py` を通す（安い）。次に akinator の `evaluations/run_case.py` を上限を小さくして通す。キーは `ANTHROPIC_API_KEY`（だめなら `CLAUDE_CODE_OAUTH_TOKEN`）。あわせて `claude-agent-acp` の版と挙動、`deniedTools` が効くかを確認する。
 2. **外部の Claude Code**：`hb mcp --channel` で、Channels 経由で受信できるか確認する。
-3. **Codex（ChatGPT プラン）**：README の「Codex を ChatGPT プランで動かす」の手順で、romaji-converter → akinator の順に実機で通す。最初に見るのは、codex-acp が起動して `session/new` が通るか、モデルが send で返すか、send に承認が求められないか。
-4. **リポジトリへの組み込み**：このリポジトリの `Makefile` と CI に harness-broker のテストを入れる。CONTRIBUTING により `make test` が必須。
-5. **通信モデルの残り**（仕様書の未決事項）：作業を止めるメッセージの表し方、ハーネスのフックでの通知（すべてのツール呼び出しの切れ目）、通知に載せる内容。実機では、モデルが send で返すか（最後の文章で答えて終わらないか）と、`mcp__hb__send` の許可だけで claude-agent-acp が確認なしに send を使えるかを最初に見る。
-6. **残りの未実装**：MCP Tasks、外向き通信の制限（egress プロキシ）、Gemini への組み込み、起動後の設定検証（README の「未実装・未確認」も参照）。
+3. **2台のマシン**：README の「場所をつなぐ」の手順で、手元の PC と別のマシン（または VM）を peers にし、別の場所での spawn と会話、`receive(from=…@場所)` の黙った検知、別の場所の履歴の追従を確かめる。クローンは、本物の claude-agent-acp と codex-acp で `session/load` が通るかを見る。
+4. **Codex（ChatGPT プラン）**：README の「Codex を ChatGPT プランで動かす」の手順で、romaji-converter → akinator の順に実機で通す。最初に見るのは、codex-acp が起動して `session/new` が通るか、モデルが send で返すか、send に承認が求められないか。
+5. **リポジトリへの組み込み**：このリポジトリの `Makefile` と CI に harness-broker のテストを入れる。CONTRIBUTING により `make test` が必須。
+6. **通信モデルの残り**（仕様書の未決事項）：作業を止めるメッセージの表し方、ハーネスのフックでの通知（すべてのツール呼び出しの切れ目）、通知に載せる内容。実機では、モデルが send で返すか（最後の文章で答えて終わらないか）と、`mcp__hb__send` の許可だけで claude-agent-acp が確認なしに send を使えるかを最初に見る。
+7. **残りの未実装**：MCP Tasks、外向き通信の制限（egress プロキシ）、Gemini への組み込み、起動後の設定検証（README の「未実装・未確認」も参照）。
 
 このリポジトリの開発ルールは `.cursor/rules/*.mdc` と CONTRIBUTING.md にある（役割分担と TDD）。

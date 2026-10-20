@@ -76,6 +76,9 @@ class LocalRunner(Runner):
         shutil.copytree(src, dest, dirs_exist_ok=True)
         return True
 
+    async def snapshot_workspace(self, handle: RunHandle, dest: Path) -> None:
+        shutil.copytree(handle.workspace_path, dest, symlinks=True)
+
     async def destroy(self, handle: RunHandle) -> None:
         if not self.keep_bundles:
             shutil.rmtree(handle.info["bundle"], ignore_errors=True)

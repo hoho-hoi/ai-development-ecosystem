@@ -57,7 +57,7 @@ class BrokerCase(unittest.IsolatedAsyncioTestCase):
 
     def first_message_id(self, session_id):
         ev = self.b.broker.store.events(session_id="operator", kinds=["message.send"])
-        return [e for e in ev if e["payload"]["to"] == session_id][0]["message_id"]
+        return [e for e in ev if e["payload"]["to"] == self.b.address(session_id)][0]["message_id"]
 
     async def turn_text(self, sid, message_id):
         ev = (await self.b.tool("history", session=sid, kinds=["turn.end"]))["events"]
@@ -72,7 +72,8 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(st["task_message_id"], self.first_message_id(sid))
         reply = await self.reply_to(st["task_message_id"], sender=sid)
         self.assertEqual(reply["body"], "echo: hello there")
-        self.assertEqual(reply["from"], sid)
+        self.assertEqual(reply["from"], st["address"])
+        self.assertEqual(st["address"], f"{sid}@pc1")
 
         # history: raw bodies, the exact injected text, the turn's text, ACP frames
         hist = (await self.b.tool("history", thread_id=reply["thread_id"]))["events"]
@@ -82,7 +83,7 @@ class LifecycleTests(BrokerCase):
         inject = next(e for e in hist if e["kind"] == "message.inject")
         self.assertEqual(
             inject["payload"]["text"],
-            f"from: operator\nmessage_id: {st['task_message_id']}\nthread_id: {reply['thread_id']}\n\nhello there",
+            f"from: operator@pc1\nmessage_id: {st['task_message_id']}\nthread_id: {reply['thread_id']}\n\nhello there",
         )
         self.assertEqual([e["payload"]["via"] for e in hist if e["kind"] == "message.deliver"], ["turn", "receive"])
         sends = [e for e in hist if e["kind"] == "message.send"]
@@ -177,7 +178,7 @@ class LifecycleTests(BrokerCase):
         await self.ask(st["id"], 'BRIDGE send {"to": "operator", "body": "a question for you"}')
         question = (await self.b.tool("receive", **{"from": st["id"]}))["messages"][0]
         answer = await self.b.tool("send", reply_to=question["message_id"], body="my answer")
-        self.assertEqual((answer["to"], answer["thread_id"]), (st["id"], question["thread_id"]))
+        self.assertEqual((answer["to"], answer["thread_id"]), (st["address"], question["thread_id"]))
         echo = await self.reply_to(answer["message_id"], sender=st["id"])
         self.assertEqual(echo["body"], "echo: my answer")
         inject = (await self.b.tool("history", session=st["id"], kinds=["message.inject"]))["events"][-1]
@@ -270,7 +271,7 @@ class ModuleProfileTests(BrokerCase):
         sent, r = await self.ask(sid, "RAW")
         self.assertEqual(
             json.loads(r["body"])["prompt"],
-            f"from: operator\nmessage_id: {sent['message_id']}\nthread_id: {sent['thread_id']}\n\nRAW",
+            f"from: operator@pc1\nmessage_id: {sent['message_id']}\nthread_id: {sent['thread_id']}\n\nRAW",
         )
 
         # the module's instructions and skills, and the denied tools, reach the harness
@@ -438,12 +439,13 @@ class BridgeTests(BrokerCase):
                 await client.initialize()
                 tools = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
-                    tools, ["send", "receive", "list_profiles", "spawn", "list_sessions", "status", "terminate", "history"]
+                    tools, ["send", "receive", "list_profiles", "spawn", "clone", "list_sessions", "status", "terminate",
+                            "history"]
                 )
                 res = await client.call_tool("list_profiles", {})
                 profiles = json.loads(res.content[0].text)["profiles"]
                 self.assertEqual(
-                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "notools"]
+                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "noload", "notools"]
                 )
                 # annotations let harnesses call the messaging tools without asking
                 listed = {t.name: t.annotations for t in (await client.list_tools()).tools}
@@ -528,7 +530,7 @@ class BridgeTests(BrokerCase):
             note = await read()
             self.assertEqual(note["method"], "notifications/claude/channel")
             self.assertEqual(note["params"]["content"], "ping from operator")
-            self.assertEqual(note["params"]["meta"]["from_id"], "operator")
+            self.assertEqual(note["params"]["meta"]["from_id"], "operator@pc1")
             self.assertEqual(note["params"]["meta"]["message_id"], sent["message_id"])
         finally:
             proc.stdin.close()

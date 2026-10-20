@@ -1,8 +1,13 @@
-"""The broker daemon: an HTTP API in front of the SessionManager.
+"""A place: the daemon that runs on one machine, an HTTP API in front of
+the SessionManager.
 
-The MCP surface is the stdio bridge (bridge.py) that each session runs; the
-bridge forwards every tool call here as POST /api/tools/<tool> with the
-session's bearer token. The operator authenticates with the broker key.
+Residents reach it through the stdio bridge (bridge.py) that each of them
+runs; the bridge forwards every tool call here as POST /api/tools/<tool> with
+the resident's bearer token. The operator authenticates with the broker key.
+
+Other places reach it at /federation/* with requests signed by their place
+key (federation.py). A tool call that names someone or somewhere in another
+place is forwarded there, once: places never relay for a third place.
 
 Every tool response except receive carries an X-HB-Unread header when the
 caller has unread messages: JSON {"count": n, "from": [{session, name, count}]}.
@@ -25,12 +30,14 @@ from starlette.routing import Route
 
 from . import __version__
 from .config import BrokerConfig, ensure_broker_key
+from .federation import Federation, Peer
+from .identity import load_or_create_key
 from .modules import ModuleCache
 from .profiles import BROKER_TOOLS, ProfileRegistry
 from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
-from .sessions import LIVE, BrokerError, Forbidden, Session, SessionManager
+from .sessions import LIVE, BrokerError, Forbidden, NotFound, Session, SessionManager
 from .store import HistoryStore
 
 log = logging.getLogger(__name__)
@@ -38,18 +45,32 @@ log = logging.getLogger(__name__)
 # tool name → (allowed argument names, required argument names)
 TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
-    "list_profiles": (set(), set()),
-    "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout"}, {"profile"}),
+    "list_profiles": ({"place"}, set()),
+    "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout", "place"}, {"profile"}),
+    "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
     "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
-    "list_sessions": ({"profile", "state", "include_ended"}, set()),
+    "list_sessions": ({"profile", "state", "include_ended", "place"}, set()),
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
-    "history": ({"session", "thread_id", "since", "until", "kinds", "after_seq", "limit"}, set()),
+    "history": ({"session", "thread_id", "since", "until", "kinds", "after_seq", "limit", "wait"}, set()),
 }
+# Tools another place may call on behalf of one of its residents. send arrives
+# as /federation/deliver, and a mailbox is read only where it is kept.
+REMOTE_TOOLS = {"list_profiles", "spawn", "clone", "list_sessions", "status", "terminate", "history"}
 
 
 assert set(BROKER_TOOLS) | {"whoami"} == set(TOOLS), "profiles.BROKER_TOOLS and daemon.TOOLS disagree"
+
+
+def target_place(manager: SessionManager, tool: str, args: dict[str, Any]) -> str | None:
+    """The other place a tool call is about, or None for here."""
+    if tool in ("list_profiles", "list_sessions", "spawn"):
+        place = args.get("place")
+        return place if place and place != manager.place else None
+    if tool in ("status", "terminate", "clone", "history") and args.get("session") not in (None, "", "self"):
+        return manager.split(str(args["session"]))[1]
+    return None
 
 
 def make_runner(cfg: BrokerConfig) -> Runner:
@@ -100,7 +121,12 @@ class Broker:
         stale = self.store.mark_stale_sessions(LIVE)
         if stale:
             self.store.record("broker.stale_sessions", sessions=stale)
-        self.manager = SessionManager(cfg, self.store, self.profiles, runner or make_runner(cfg))
+        self.federation = Federation(
+            cfg.place,
+            load_or_create_key(cfg.place_key_file),
+            [Peer(p.name, p.url, p.public_key) for p in cfg.peers],
+        )
+        self.manager = SessionManager(cfg, self.store, self.profiles, runner or make_runner(cfg), self.federation)
 
     def _bearer(self, request: Request) -> str:
         auth = request.headers.get("authorization", "")
@@ -117,18 +143,51 @@ class Broker:
             return self.manager.operator
         return self.manager.by_token(token)
 
-    async def call_tool(self, caller: Session, tool: str, args: dict[str, Any]) -> Any:
+    def place_info(self) -> dict[str, Any]:
+        return {
+            "name": self.federation.name,
+            "public_key": self.federation.key.public_hex,
+            "url": self.cfg.public_url or self.cfg.local_url,
+            "peers": [{"name": p.name, "url": p.url} for p in self.federation.peers.values()],
+        }
+
+    async def call_tool(self, caller: Session, tool: str, args: dict[str, Any], forwarded: bool = False) -> Any:
         m = self.manager
+        place = target_place(m, tool, args)
+        if place:
+            if forwarded:
+                raise Forbidden(f"{self.federation.name} does not relay calls to a third place ({place})")
+            wait = float(args.get("wait_timeout", 600)) if tool in ("spawn", "clone") else float(args.get("wait") or 0)
+            if tool == "spawn":  # the task goes as an ordinary signed message from the caller
+                return await m.spawn(
+                    caller, args["profile"], task=args.get("task"), ref=args.get("ref"), name=args.get("name"),
+                    wait=bool(args.get("wait", True)), wait_timeout=wait, place=place,
+                )
+            return await m.forward(caller, place, tool, args, timeout=wait + 120)
         if tool == "whoami":
-            return caller.summary()
+            return {**m.summary(caller), "public_key": caller.key.public_hex if caller.key else None}
         if tool == "list_profiles":
-            return {"profiles": [p.agent_card() for p in self.profiles.list()], "errors": self.profiles.errors()}
+            return {
+                "place": m.place,
+                "places": sorted(self.federation.peers),  # where else profiles can be listed and spawned
+                "profiles": [p.agent_card() for p in self.profiles.list()],
+                "errors": self.profiles.errors(),
+            }
         if tool == "spawn":
             return await m.spawn(
                 caller,
                 args["profile"],
                 task=args.get("task"),
                 ref=args.get("ref"),
+                name=args.get("name"),
+                wait=bool(args.get("wait", True)),
+                wait_timeout=float(args.get("wait_timeout", 600)),
+            )
+        if tool == "clone":
+            target = caller.id if args["session"] == "self" else args["session"]
+            return await m.clone(
+                caller,
+                target,
                 name=args.get("name"),
                 wait=bool(args.get("wait", True)),
                 wait_timeout=float(args.get("wait_timeout", 600)),
@@ -148,9 +207,10 @@ class Broker:
             )
         if tool == "list_sessions":
             return {
+                "place": m.place,
                 "sessions": m.list_sessions(
                     profile=args.get("profile"), state=args.get("state"), include_ended=bool(args.get("include_ended"))
-                )
+                ),
             }
         if tool == "status":
             return m.status(caller.id if args["session"] == "self" else args["session"])
@@ -158,32 +218,60 @@ class Broker:
             target = caller.id if args["session"] == "self" else args["session"]
             return await m.terminate(caller, target, args.get("reason"))
         if tool == "history":
+            # Thoughts are open: anyone may read anyone's history.
             q = {k: v for k, v in args.items() if v is not None}
             q.setdefault("limit", 1000)
             if q.get("session") == "self":
                 q["session"] = caller.id
-            self._check_history_access(caller, q)
-            return {"events": m.history(**q)}
+            return {"place": m.place, "events": await m.history(**q)}
         raise BrokerError(f"unknown tool {tool!r}")
-
-    def _check_history_access(self, caller: Session, q: dict[str, Any]) -> None:
-        """The operator reads everything. A session reads its own events,
-        those of sessions it spawned, and threads it took part in."""
-        if caller.kind == "operator":
-            return
-        if q.get("session"):
-            target = self.manager.resolve(q["session"], live_only=False)
-            if target.id != caller.id and target.parent_id != caller.id:
-                raise Forbidden("history of other sessions is limited to sessions you spawned")
-        elif q.get("thread_id"):
-            if not self.store.participates(caller.id, q["thread_id"]):
-                raise Forbidden("you did not take part in that thread")
-        else:
-            q["session"] = caller.id
 
     # --- HTTP handlers -------------------------------------------------------
     async def health(self, request: Request) -> JSONResponse:
-        return JSONResponse({"ok": True, "version": __version__})
+        return JSONResponse({"ok": True, "version": __version__, "place": self.federation.name})
+
+    async def place(self, request: Request) -> JSONResponse:
+        """Who this place is: what another place needs to list it as a peer."""
+        return JSONResponse(self.place_info())
+
+    # --- other places ---------------------------------------------------------------
+    async def _federation_request(self, request: Request) -> tuple[str, dict[str, Any]]:
+        body = await request.body()
+        try:
+            place = self.federation.verify_request(request.headers, request.method, request.url.path, body)
+        except PermissionError as e:
+            raise Forbidden(str(e)) from None
+        data = json.loads(body or b"{}")
+        if not isinstance(data, dict):
+            raise BrokerError("payload must be a JSON object")
+        return place, data
+
+    async def federation_endpoint(self, request: Request) -> JSONResponse:
+        op = request.path_params["op"]
+        try:
+            place, data = await self._federation_request(request)
+            if op == "deliver":
+                result = self.manager.deliver(data.get("envelope") or {}, place)
+            elif op == "quiet":
+                result = await self.manager.wait_quiet(str(data.get("session") or ""), float(data.get("wait") or 0))
+            elif op == "call":
+                tool = str(data.get("tool") or "")
+                if tool not in REMOTE_TOOLS:
+                    raise Forbidden(f"{tool!r} cannot be called from another place")
+                args = data.get("args") or {}
+                allowed, required = TOOLS[tool]
+                if not isinstance(args, dict) or set(args) - allowed or required - set(args):
+                    raise BrokerError(f"bad arguments for {tool}")
+                caller = self.manager.remote_caller(data.get("caller") or {}, place)
+                self.store.record("federation.call", session_id=caller.id, place=place, tool=tool, args=args)
+                result = await self.call_tool(caller, tool, args, forwarded=True)
+            else:
+                raise NotFound(f"no federation endpoint {op!r}")
+            return JSONResponse(result)
+        except BrokerError as e:
+            return JSONResponse({"error": str(e)}, status_code=e.status)
+        except (KeyError, ValueError, TypeError) as e:
+            return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
 
     async def register(self, request: Request) -> JSONResponse:
         try:
@@ -239,6 +327,9 @@ class Broker:
             self.store.record(
                 "broker.start",
                 version=__version__,
+                place=self.federation.name,
+                public_key=self.federation.key.public_hex,
+                peers=[p.name for p in self.federation.peers.values()],
                 runner=self.manager.runner.name,
                 runtime_broker_url=self.manager.runner.broker_url,
                 removed_orphans=removed,
@@ -252,6 +343,8 @@ class Broker:
         return Starlette(
             routes=[
                 Route("/api/health", self.health, methods=["GET"]),
+                Route("/api/place", self.place, methods=["GET"]),
+                Route("/federation/{op}", self.federation_endpoint, methods=["POST"]),
                 Route("/api/register", self.register, methods=["POST"]),
                 Route("/api/tools/{tool}", self.tool, methods=["POST"]),
             ],
@@ -266,7 +359,8 @@ async def serve(cfg: BrokerConfig, broker: Broker | None = None) -> None:
     sockets = make_sockets(cfg, broker.manager.runner)
     config = uvicorn.Config(broker.app(), log_level="warning", lifespan="on")
     log.warning(
-        "harness-broker listening on %s; sessions reach it at %s",
+        "place %s listening on %s; sessions reach it at %s",
+        broker.federation.name,
         ", ".join(f"{s.getsockname()[0]}:{s.getsockname()[1]}" for s in sockets),
         broker.manager.runner.broker_url,
     )

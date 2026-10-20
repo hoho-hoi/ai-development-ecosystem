@@ -76,6 +76,16 @@ class AcpClient:
         result = await self.peer.request("session/new", {"cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout)
         return result["sessionId"]
 
+    async def load_session(
+        self, session_id: str, cwd: str, mcp_servers: list[dict[str, Any]], timeout: float = 300
+    ) -> None:
+        """Resume a conversation from the harness's own records (needs the
+        agent's loadSession capability). The agent replays it as session/update
+        notifications before answering."""
+        await self.peer.request(
+            "session/load", {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout
+        )
+
     async def prompt(self, session_id: str, text: str) -> tuple[str, str]:
         """Run one prompt turn. Returns (stopReason, the text the agent wrote)."""
         self._collect[session_id] = []

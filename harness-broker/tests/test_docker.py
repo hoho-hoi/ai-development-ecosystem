@@ -75,6 +75,23 @@ class DockerTests(BrokerCase):
         transcript = self.b.cfg.history_dir / "sessions" / sid / "harness" / "projects" / "transcript.jsonl"
         self.assertTrue(transcript.is_file())
 
+    async def test_clone_in_container(self):
+        st = await self.b.tool("spawn", profile="echo", wait=True, wait_timeout=120)
+        _, r = await self.ask(st["id"], "REMEMBER the container", wait=60)
+        await self.ask(st["id"], "WRITE note.txt made inside", wait=60)
+        twin = await self.b.tool("clone", session=st["id"], wait=True, wait_timeout=120)
+        self.assertEqual(twin["state"], "idle", twin)
+        _, r = await self.ask(twin["id"], "MEMORY", wait=60)
+        self.assertEqual(json.loads(r["body"])["memory"], ["the container"])
+        _, r = await self.ask(twin["id"], "READ note.txt", wait=60)
+        self.assertEqual(json.loads(r["body"]), "made inside")
+        _, r = await self.ask(twin["id"], "WRITE other.txt the clone can write", wait=60)  # workspace owned by agent
+        self.assertEqual(r["body"], "wrote other.txt")
+        info = json.loads(docker("inspect", f"hb-{twin['id']}").stdout)[0]
+        self.assertEqual(info["HostConfig"]["CapDrop"], ["ALL"])
+        for sid in (st["id"], twin["id"]):
+            await self.b.tool("terminate", session=sid)
+
     async def test_codex_plan_login_in_container(self):
         st = await self.b.tool("spawn", profile="codexplan", wait=True, wait_timeout=120)
         self.assertEqual(st["state"], "idle", st)

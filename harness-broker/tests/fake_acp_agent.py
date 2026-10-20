@@ -8,6 +8,8 @@ reply as its final text, which the broker records and delivers to no one.
 Without a bridge it can only write the final text.
 
 The reply is "echo: <body>", except for these bodies:
+    echo: …            (another agent's echo) noted as "heard: …" and not answered,
+                       so two fake agents do not echo each other forever
     SLEEP <s>          wait s seconds, then reply
     DELAY <s> <body>   wait s seconds, then handle <body>
     PERMISSION <kind>  ask session/request_permission for a tool of that kind,
@@ -21,11 +23,18 @@ The reply is "echo: <body>", except for these bodies:
                        call that bridge tool, reply with the tool result;
                        "$MSG" in the JSON becomes the current message id
     CODEX_AUTH         reply with what the session's Codex login looks like
+    REMEMBER <text>    keep text in this conversation's memory
+    MEMORY             reply with this conversation's memory (restored by session/load)
+    WRITE <path> <text>
+                       write a file in the workspace
+    READ <path>        reply with a workspace file's content (null if missing)
     FINAL_ONLY         write a final text but send nothing
     SILENT             write nothing and send nothing
     CRASH              exit with code 3
 Every prompt is appended to a transcript under $CLAUDE_CONFIG_DIR (or
-$CODEX_HOME), standing in for the harness's own session records.
+$CODEX_HOME), standing in for the harness's own session records; session/load
+rebuilds a conversation's memory from it (loadSession is advertised unless
+FAKE_NO_LOAD=1).
 """
 
 import json
@@ -35,7 +44,8 @@ import sys
 import time
 from pathlib import Path
 
-state = {"mcp": None, "next_id": 1000, "sessions": 0, "prompts": {}, "closed": [], "bridge": None, "rpc": 10}
+state = {"mcp": None, "next_id": 1000, "sessions": 0, "prompts": {}, "closed": [], "bridge": None, "rpc": 10,
+         "memory": {}, "loaded": []}
 
 
 def write(frame):
@@ -50,14 +60,37 @@ def read_frame():
     return json.loads(line)
 
 
-def transcript(entry):
+def transcript_file():
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CODEX_HOME")
-    if not base:
+    return Path(base) / "projects" / "transcript.jsonl" if base else None
+
+
+def transcript(entry):
+    f = transcript_file()
+    if f is None:
         return
-    d = Path(base) / "projects"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / "transcript.jsonl", "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def load_session(rid, params):
+    """Resume a conversation from the transcript: replay it, restore its memory."""
+    sid = params.get("sessionId")
+    f = transcript_file()
+    entries = [json.loads(line) for line in f.read_text().splitlines()] if f and f.is_file() else []
+    mine = [e for e in entries if e.get("session") == sid]
+    if not mine:
+        write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32002, "message": f"session {sid} not found"}})
+        return
+    state["mcp"] = params.get("mcpServers")
+    state["memory"][sid] = [e["remember"] for e in mine if "remember" in e]
+    state["loaded"].append(sid)
+    for e in mine:
+        if "prompt" in e:
+            write({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": e["prompt"]}}}})
+    write({"jsonrpc": "2.0", "id": rid, "result": {}})
 
 
 def parse(text):
@@ -147,7 +180,7 @@ def handle_prompt(rid, params):
     text = params["prompt"][0]["text"]
     state["prompts"][sid] = state["prompts"].get(sid, 0) + 1
     meta, body = parse(text)
-    transcript({"prompt": text})
+    transcript({"session": sid, "prompt": text})
     while body.startswith("DELAY "):
         _, secs, body = body.split(" ", 2)
         time.sleep(float(secs))
@@ -204,6 +237,22 @@ def handle_prompt(rid, params):
             "config": (home / "config.toml").read_text() if (home / "config.toml").is_file() else None,
             "env": {k: os.environ.get(k) for k in ("NO_BROWSER", "INITIAL_AGENT_MODE")},
         })
+    elif body.startswith("REMEMBER "):
+        item = body[len("REMEMBER "):]
+        state["memory"].setdefault(sid, []).append(item)
+        transcript({"session": sid, "remember": item})
+        reply = "remembered: " + item
+    elif body == "MEMORY":
+        reply = json.dumps({"session": sid, "memory": state["memory"].get(sid, []), "loaded": state["loaded"]})
+    elif body.startswith("WRITE "):
+        _, rel, content = body.split(" ", 2)
+        (Path.cwd() / rel).write_text(content)
+        reply = "wrote " + rel
+    elif body.startswith("READ "):
+        f = Path.cwd() / body.split(" ", 1)[1]
+        reply = json.dumps(f.read_text() if f.is_file() else None)
+    elif body.startswith("echo: "):
+        reply, send_reply = "heard: " + body, False
     elif body == "FINAL_ONLY":
         reply, send_reply = "this final text goes to no one", False
     elif body == "SILENT":
@@ -217,7 +266,7 @@ def handle_prompt(rid, params):
     if reply:
         for part in (reply[: len(reply) // 2], reply[len(reply) // 2 :]):
             chunk(sid, part)
-    transcript({"reply": reply})
+    transcript({"session": sid, "reply": reply})
     write({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
 
@@ -232,7 +281,8 @@ def main():
                     "id": rid,
                     "result": {
                         "protocolVersion": 1,
-                        "agentCapabilities": {"loadSession": False, "sessionCapabilities": {"close": {}}},
+                        "agentCapabilities": {"loadSession": os.environ.get("FAKE_NO_LOAD") != "1",
+                                              "sessionCapabilities": {"close": {}}},
                         "agentInfo": {"name": "fake-agent", "version": "0"},
                         "authMethods": [],
                     },
@@ -242,6 +292,8 @@ def main():
             state["mcp"] = params.get("mcpServers")
             state["sessions"] += 1
             write({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": f"fake-session-{state['sessions']}"}})
+        elif method == "session/load":
+            load_session(rid, params)
         elif method == "session/close":
             state["closed"].append(params.get("sessionId"))
             write({"jsonrpc": "2.0", "id": rid, "result": {}})

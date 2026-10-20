@@ -174,6 +174,12 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
                         "permissions": {"mode": "deny"}},
             "limits": base["limits"],
         }
+        profiles["noload"] = {  # a harness that cannot resume a conversation
+            "id": "noload", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "execution"},
+            "runtime": {**rt, "env": {"FAKE_NO_LOAD": "1"}},
+            "limits": base["limits"],
+        }
         profiles["notools"] = {
             "id": "notools", "version": "1.0.0",
             "module": {"local": str(mrepo), "path": "execution"},
@@ -185,18 +191,24 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
 
 
 class RunningBroker:
-    """Broker + uvicorn on a free port inside the test's event loop."""
+    """A place (broker + uvicorn on a free port) inside the test's event loop.
+    Several can run side by side, each in its own directory, as peers."""
 
-    def __init__(self, tmp: Path, repo: Path, commit: str, docker_image: str | None = None):
-        module_repo = make_module_repo(tmp)
+    def __init__(self, tmp: Path, repo: Path, commit: str, docker_image: str | None = None, place: str = "pc1"):
+        if not (tmp / "module-repo").exists():
+            make_module_repo(tmp)
+        module_repo = (tmp / "module-repo", git(tmp / "module-repo", "rev-parse", "HEAD"))
+        home = tmp / place
         if docker_image:
-            write_profiles(tmp / "profiles", repo, commit, image=docker_image,
+            write_profiles(home / "profiles", repo, commit, image=docker_image,
                            adapter=["python3", "/opt/hb/fake_acp_agent.py"], module_repo=module_repo)
         else:
-            write_profiles(tmp / "profiles", repo, commit, module_repo=module_repo)
+            write_profiles(home / "profiles", repo, commit, module_repo=module_repo)
+        self.place = place
         self.cfg = BrokerConfig(
-            state_dir=tmp / "state",
-            profiles_dir=tmp / "profiles",
+            place=place,
+            state_dir=home / "state",
+            profiles_dir=home / "profiles",
             listen_port=0,
             runner="docker" if docker_image else "local",
             allow_local_runner=not docker_image,
@@ -223,6 +235,16 @@ class RunningBroker:
                 return
             await asyncio.sleep(0.05)
         raise RuntimeError("broker did not start")
+
+    def address(self, sid: str) -> str:
+        return f"{sid}@{self.place}"
+
+    def trust(self, other: "RunningBroker") -> None:
+        """Make other a peer of this place (as its `peers` entry would)."""
+        from hbroker.federation import Peer
+
+        fed = other.broker.federation
+        self.broker.federation.add_peer(Peer(other.place, other.url, fed.key.public_hex))
 
     async def stop(self) -> None:
         self._server.should_exit = True

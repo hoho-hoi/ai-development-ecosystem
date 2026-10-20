@@ -5,9 +5,12 @@ Every event is appended, unabridged, to a JSON-lines file per day
 plus the session and message tables. The JSONL files are the record of truth
 and are never rewritten.
 
-The message table is also every session's mailbox: a message is unread until
+The message table is also every resident's mailbox: a message is unread until
 delivered_at is set, either when it starts a turn ("turn") or when the
-recipient takes it with receive ("receive").
+recipient takes it with receive ("receive"). from_id is the sender's full
+address (id@place); to_id is a resident's id, or the full address of someone
+elsewhere for the copies this place keeps of what its residents sent out.
+Every message carries its sender's signature (sig).
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -61,7 +64,9 @@ CREATE TABLE IF NOT EXISTS messages (
     body TEXT NOT NULL,
     idempotency_key TEXT,
     delivery TEXT NOT NULL,
-    delivered_at TEXT
+    delivered_at TEXT,
+    from_name TEXT,
+    sig TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(from_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS messages_inbox ON messages(to_id, delivered_at, ts);
@@ -81,7 +86,16 @@ class HistoryStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self._secrets: dict[str, str] = {}
+        self.listeners: list[Callable[[], None]] = []  # called after every recorded event
+
+    def _migrate(self) -> None:
+        """Columns added after the first release."""
+        have = {r["name"] for r in self.db.execute("PRAGMA table_info(messages)")}
+        for col in ("from_name", "sig"):
+            if col not in have:
+                self.db.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
 
     # --- redaction -------------------------------------------------------
     def add_secret(self, name: str, value: str) -> None:
@@ -128,6 +142,8 @@ class HistoryStore:
             )
             with open(self.root / "events" / f"{ts[:10]}.jsonl", "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+        for listener in self.listeners:
+            listener()
         return seq
 
     def events(
@@ -195,14 +211,6 @@ class HistoryStore:
             )
         return ids
 
-    def participates(self, session_id: str, thread_id: str) -> bool:
-        with self._lock:
-            r = self.db.execute(
-                "SELECT 1 FROM messages WHERE thread_id = ? AND (from_id = ? OR to_id = ?) LIMIT 1",
-                (thread_id, session_id, session_id),
-            ).fetchone()
-        return r is not None
-
     def session_rows(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self.db.execute("SELECT * FROM sessions ORDER BY created_at").fetchall()
@@ -217,11 +225,13 @@ class HistoryStore:
         return dict(r) if r else None
 
     def insert_message(self, msg: dict[str, Any]) -> None:
+        row = {"from_name": None, "sig": None, "idempotency_key": None, **msg}
         with self._lock:
             self.db.execute(
-                "INSERT INTO messages(id, ts, from_id, to_id, thread_id, reply_to, body, idempotency_key, delivery) "
-                "VALUES (:id, :ts, :from_id, :to_id, :thread_id, :reply_to, :body, :idempotency_key, :delivery)",
-                msg,
+                "INSERT INTO messages(id, ts, from_id, from_name, to_id, thread_id, reply_to, body, idempotency_key, "
+                "delivery, sig) VALUES (:id, :ts, :from_id, :from_name, :to_id, :thread_id, :reply_to, :body, "
+                ":idempotency_key, :delivery, :sig)",
+                row,
             )
 
     def message(self, message_id: str) -> dict[str, Any] | None:
@@ -253,15 +263,15 @@ class HistoryStore:
             rows = self.db.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
-    def unread_by_sender(self, to_id: str) -> list[tuple[str, int]]:
-        """[(from_id, count)] of unread messages, oldest sender first."""
+    def unread_by_sender(self, to_id: str) -> list[tuple[str, str | None, int]]:
+        """[(sender address, sender name, count)] of unread messages, oldest sender first."""
         with self._lock:
             rows = self.db.execute(
-                "SELECT from_id, COUNT(*) AS n, MIN(ts) AS first FROM messages "
+                "SELECT from_id, MAX(from_name) AS name, COUNT(*) AS n, MIN(ts) AS first FROM messages "
                 "WHERE to_id = ? AND delivered_at IS NULL GROUP BY from_id ORDER BY first",
                 (to_id,),
             ).fetchall()
-        return [(r["from_id"], int(r["n"])) for r in rows]
+        return [(r["from_id"], r["name"], int(r["n"])) for r in rows]
 
     def close(self) -> None:
         with self._lock:

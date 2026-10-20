@@ -47,7 +47,7 @@ Harness = Literal["claude-code", "codex", "gemini", "custom"]
 
 
 # Tools the broker offers to sessions, in the order the bridge lists them.
-BROKER_TOOLS = ("send", "receive", "list_profiles", "spawn", "list_sessions", "status", "terminate", "history")
+BROKER_TOOLS = ("send", "receive", "list_profiles", "spawn", "clone", "list_sessions", "status", "terminate", "history")
 
 class _Model(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")

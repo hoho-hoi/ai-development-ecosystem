@@ -302,10 +302,10 @@ class StoreTests(unittest.TestCase):
             self.assertEqual([m["id"] for m in st.unread("me", from_id="a")], ["m1", "m3"])
             self.assertEqual([m["id"] for m in st.unread("me", reply_to="m9")], ["m2"])
             self.assertEqual([m["id"] for m in st.unread("me", limit=1)], ["m1"])
-            self.assertEqual(st.unread_by_sender("me"), [("a", 2), ("b", 1)])
+            self.assertEqual(st.unread_by_sender("me"), [("a", None, 2), ("b", None, 1)])
             st.mark_delivered("m2", "receive")
             self.assertEqual(st.message("m2")["delivery"], "receive")
-            self.assertEqual(st.unread_by_sender("me"), [("a", 2)])
+            self.assertEqual(st.unread_by_sender("me"), [("a", None, 2)])
             st.close()
 
     def test_broker_tools_setting(self):
@@ -317,7 +317,7 @@ class StoreTests(unittest.TestCase):
                 data["runtime"]["brokerTools"] = v
             return profile_from_dict(data, Path(".")).runtime.broker_tools
         self.assertEqual(tools(None)[:2], ["send", "receive"])
-        self.assertEqual(len(tools(True)), 8)
+        self.assertEqual(len(tools(True)), 9)
         self.assertEqual(tools(False), [])
         self.assertEqual(tools(["send"]), ["send"])
         with self.assertRaises(Exception):
@@ -383,11 +383,109 @@ class CodexLoginTests(unittest.TestCase):
         from hbroker.bridge import TOOLS
 
         ann = {t["name"]: t["annotations"] for t in TOOLS}
-        for name in ("send", "receive", "spawn"):
+        for name in ("send", "receive", "spawn", "clone"):
             self.assertEqual((ann[name]["destructiveHint"], ann[name]["openWorldHint"]), (False, False), name)
         self.assertTrue(ann["terminate"]["destructiveHint"])
         for name in ("list_profiles", "list_sessions", "status", "history"):
             self.assertTrue(ann[name]["readOnlyHint"], name)
+
+
+class IdentityTests(unittest.TestCase):
+    def test_ids_are_self_certifying(self):
+        from hbroker.identity import Key, session_id_for, verify
+
+        k = Key.generate()
+        sid = session_id_for(k.public)
+        self.assertRegex(sid, r"^s-[0-9a-f]{16}$")
+        self.assertEqual(session_id_for(Key.from_hex(k.private_hex()).public), sid)
+        sig = k.sign(b"data")
+        self.assertTrue(verify(k.public_hex, sig, b"data"))
+        self.assertFalse(verify(k.public_hex, sig, b"other"))
+        self.assertFalse(verify(Key.generate().public_hex, sig, b"data"))
+        self.assertFalse(verify("zz", sig, b"data"))
+
+    def test_message_signature_covers_the_message_not_the_transport(self):
+        from hbroker.identity import message_bytes
+
+        env = {"id": "m-1", "from": "s-a@pc1", "to": "s-b@pc2", "thread_id": "t", "reply_to": None,
+               "body": "こんにちは", "sent_at": "2026-10-21T00:00:00+00:00"}
+        same = {**dict(reversed(list(env.items()))), "from_name": "a", "sig": "x"}
+        self.assertEqual(message_bytes(env), message_bytes(same))
+        self.assertNotEqual(message_bytes(env), message_bytes({**env, "to": "s-c@pc2"}))
+
+    def test_addresses(self):
+        from hbroker.identity import split_address
+
+        self.assertEqual(split_address("s-1@pc1"), ("s-1", "pc1"))
+        self.assertEqual(split_address("echo"), ("echo", None))
+        for bad in ("@pc1", "s-1@"):
+            with self.assertRaises(ValueError):
+                split_address(bad)
+
+    def test_place_key_file(self):
+        import os
+        import stat
+
+        from hbroker.identity import load_or_create_key
+
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "state" / "place.key"
+            k = load_or_create_key(f)
+            self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o600)
+            self.assertEqual(load_or_create_key(f).public_hex, k.public_hex)
+
+    def test_place_requests_are_signed(self):
+        from hbroker.federation import Federation, Peer
+        from hbroker.identity import Key
+
+        a, b = Federation("pc1", Key.generate()), Federation("pc2", Key.generate())
+        b.add_peer(Peer("pc1", "http://x", a.key.public_hex))
+        body = b'{"x": 1}'
+        h = {k.lower(): v for k, v in a.sign_headers("POST", "/federation/deliver", body).items()}
+        self.assertEqual(b.verify_request(h, "POST", "/federation/deliver", body), "pc1")
+        for what, args in {
+            "body": (h, "POST", "/federation/deliver", b"{}"),
+            "path": (h, "POST", "/federation/call", body),
+            "time": ({**h, "x-hb-time": str(int(h["x-hb-time"]) - 1000)}, "POST", "/federation/deliver", body),
+            "place": ({**h, "x-hb-place": "pc3"}, "POST", "/federation/deliver", body),
+        }.items():
+            with self.assertRaises(PermissionError, msg=what):
+                b.verify_request(*args)
+
+    def test_place_config(self):
+        from pydantic import ValidationError
+
+        from hbroker.config import BrokerConfig, PeerSettings
+        from hbroker.identity import Key
+
+        self.assertRegex(BrokerConfig().place, r"^[a-z0-9][a-z0-9-]*$")
+        with self.assertRaises(ValidationError):
+            BrokerConfig(place="My PC")
+        with self.assertRaises(ValidationError):
+            PeerSettings(name="pc2", url="http://x", public_key="abc")
+        ok = PeerSettings(name="pc2", url="http://x", public_key=Key.generate().public_hex.upper())
+        self.assertEqual(ok.public_key, ok.public_key.lower())
+
+    def test_store_keeps_signatures_and_migrates(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as t:
+            db = sqlite3.connect(Path(t) / "index.sqlite3")
+            db.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, ts TEXT NOT NULL, from_id TEXT NOT NULL, "
+                       "to_id TEXT NOT NULL, thread_id TEXT NOT NULL, reply_to TEXT, body TEXT NOT NULL, "
+                       "idempotency_key TEXT, delivery TEXT NOT NULL, delivered_at TEXT)")
+            db.commit()
+            db.close()
+            st = HistoryStore(t)  # a v0.5 store gains the new columns
+            seen = []
+            st.listeners.append(lambda: seen.append(1))
+            st.insert_message({"id": "m1", "ts": "1", "from_id": "s-a@pc1", "from_name": "a", "to_id": "me",
+                               "thread_id": "t", "reply_to": None, "body": "b", "delivery": "mailbox", "sig": "ab"})
+            self.assertEqual((st.message("m1")["sig"], st.message("m1")["from_name"]), ("ab", "a"))
+            self.assertEqual(st.unread_by_sender("me"), [("s-a@pc1", "a", 1)])
+            st.record("x")
+            self.assertEqual(seen, [1])
+            st.close()
 
 
 if __name__ == "__main__":

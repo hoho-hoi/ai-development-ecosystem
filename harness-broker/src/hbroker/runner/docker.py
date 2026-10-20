@@ -210,6 +210,10 @@ class DockerRunner(Runner):
         )
         return code == 0
 
+    async def snapshot_workspace(self, handle: RunHandle, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        await _run(self.docker, "cp", f"{handle.info['container']}:{CONTAINER_WORKSPACE}", str(dest))
+
     async def destroy(self, handle: RunHandle) -> None:
         await _run(self.docker, "rm", "-f", handle.info["container"], check=False)
         if not self.keep_bundles:

@@ -1,10 +1,27 @@
-# harness-broker configuration. Copy to hb.yaml and run: hb daemon --config hb.yaml
+# harness-broker configuration for one place (one machine).
+# Copy to hb.yaml and run: hb daemon --config hb.yaml
 # Relative paths are relative to this file.
 
-profiles_dir: profiles
-# state_dir: ~/.local/state/harness-broker   # history, bundles and the broker key
+# This place's name: the part after @ in its residents' addresses (id@place).
+# Default: the hostname, lowercased.
+# place: pc1
 
-listen_host: 127.0.0.1
+# Places this one talks to. There is no center: each place lists the places it
+# trusts, with their keys. `hb place --config hb.yaml` prints this place's
+# entry to paste into the others' lists. Trusting a place means trusting it to
+# speak for its residents and its operator.
+# peers:
+#   - name: pc2
+#     url: http://pc2.tailnet.example:8765
+#     public_key: 3b6a27bc...   # 64 hex characters, from `hb place` on pc2
+# The URL the others reach this place at (shown by `hb place`). For other
+# machines to reach it, listen_host must not be loopback only.
+# public_url: http://pc1.tailnet.example:8765
+
+profiles_dir: profiles
+# state_dir: ~/.local/state/harness-broker   # history, bundles, the broker key and the place key
+
+listen_host: 127.0.0.1   # 0.0.0.0 (or a VPN address) when other places must reach this one
 listen_port: 8765
 
 # docker: one container per session (default).

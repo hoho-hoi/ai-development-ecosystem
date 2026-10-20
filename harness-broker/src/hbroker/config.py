@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .identity import PLACE_NAME_RE
 
 DEFAULT_STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "harness-broker"
 
@@ -19,9 +21,50 @@ class DockerSettings(BaseModel):
     network: str = "hb-net"
 
 
+class PeerSettings(BaseModel):
+    """Another place this one trusts: its name, where it listens, its key."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    url: str
+    public_key: str
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        if not PLACE_NAME_RE.match(v):
+            raise ValueError(f"place name {v!r} must be lowercase letters, digits and '-'")
+        return v
+
+    @field_validator("public_key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        try:
+            if len(bytes.fromhex(v)) != 32:
+                raise ValueError
+        except ValueError:
+            raise ValueError("public_key must be 64 hex characters (an Ed25519 public key; see `hb place`)") from None
+        return v.lower()
+
+
+def default_place_name() -> str:
+    import re
+    import socket
+
+    name = re.sub(r"[^a-z0-9-]+", "-", socket.gethostname().lower()).strip("-")
+    return (name or "place")[:63]
+
+
 class BrokerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # This place's name: the part after @ in its residents' addresses.
+    place: str = Field(default_factory=default_place_name)
+    # Places this one talks to. There is no center; each place lists its peers.
+    peers: list[PeerSettings] = Field(default_factory=list)
+    # The URL other places reach this one at (shown by `hb place`); listen_host
+    # must then be reachable from them, e.g. 0.0.0.0 or a VPN address.
+    public_url: str | None = None
     state_dir: Path = DEFAULT_STATE_DIR
     profiles_dir: Path = Path("profiles")
     listen_host: str = "127.0.0.1"
@@ -42,6 +85,13 @@ class BrokerConfig(BaseModel):
     # profiles with runtime.login: chatgpt. Default: <state_dir>/codex-login.
     codex_login_dir: Path | None = None
 
+    @field_validator("place")
+    @classmethod
+    def _place(cls, v: str) -> str:
+        if not PLACE_NAME_RE.match(v):
+            raise ValueError(f"place name {v!r} must be lowercase letters, digits and '-'")
+        return v
+
     @property
     def codex_login_path(self) -> Path:
         return self.codex_login_dir or self.state_dir / "codex-login"
@@ -53,6 +103,10 @@ class BrokerConfig(BaseModel):
     @property
     def key_file(self) -> Path:
         return self.state_dir / "broker.key"
+
+    @property
+    def place_key_file(self) -> Path:
+        return self.state_dir / "place.key"
 
     @property
     def local_url(self) -> str:
