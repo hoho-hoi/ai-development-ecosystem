@@ -253,12 +253,10 @@ class LifecycleTests(BrokerCase):
         perms = (await self.b.tool("history", session=st["id"], kinds=["acp.permission"]))["events"]
         self.assertEqual(len(perms), 2)
 
-    async def test_idempotent_send(self):
+    async def test_send_has_no_idempotency_key(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
-        a = await self.b.tool("send", to=st["id"], body="once", idempotency_key="k1")
-        b = await self.b.tool("send", to=st["id"], body="once", idempotency_key="k1")
-        self.assertEqual(a["message_id"], b["message_id"])
-        self.assertTrue(b.get("duplicate"))
+        code, body = await self.b.post("/api/tools/send", {"to": st["id"], "body": "x", "idempotency_key": "k1"})
+        self.assertEqual(code, 400, body)
 
 
 class ModuleProfileTests(BrokerCase):

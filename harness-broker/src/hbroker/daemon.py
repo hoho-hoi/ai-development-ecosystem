@@ -48,7 +48,7 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "list_profiles": ({"place"}, set()),
     "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout", "place"}, {"profile"}),
     "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
-    "send": ({"to", "body", "thread_id", "reply_to", "idempotency_key"}, {"body"}),
+    "send": ({"to", "body", "thread_id", "reply_to"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
     "list_sessions": ({"profile", "state", "include_ended", "place"}, set()),
     "status": ({"session"}, {"session"}),
@@ -199,7 +199,6 @@ class Broker:
                 args["body"],
                 thread_id=args.get("thread_id"),
                 reply_to=args.get("reply_to"),
-                idempotency_key=args.get("idempotency_key"),
             )
         if tool == "receive":
             return await m.receive(

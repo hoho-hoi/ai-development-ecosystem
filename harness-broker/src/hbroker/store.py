@@ -62,13 +62,11 @@ CREATE TABLE IF NOT EXISTS messages (
     thread_id TEXT NOT NULL,
     reply_to TEXT,
     body TEXT NOT NULL,
-    idempotency_key TEXT,
     delivery TEXT NOT NULL,
     delivered_at TEXT,
     from_name TEXT,
     sig TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS messages_idem ON messages(from_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS messages_inbox ON messages(to_id, delivered_at, ts);
 """
 
@@ -217,20 +215,12 @@ class HistoryStore:
         return [{**dict(r), "meta": json.loads(r["meta"])} for r in rows]
 
     # --- messages -----------------------------------------------------------
-    def find_idempotent(self, from_id: str, key: str) -> dict[str, Any] | None:
-        with self._lock:
-            r = self.db.execute(
-                "SELECT * FROM messages WHERE from_id = ? AND idempotency_key = ?", (from_id, key)
-            ).fetchone()
-        return dict(r) if r else None
-
     def insert_message(self, msg: dict[str, Any]) -> None:
-        row = {"from_name": None, "sig": None, "idempotency_key": None, **msg}
+        row = {"from_name": None, "sig": None, **msg}
         with self._lock:
             self.db.execute(
-                "INSERT INTO messages(id, ts, from_id, from_name, to_id, thread_id, reply_to, body, idempotency_key, "
-                "delivery, sig) VALUES (:id, :ts, :from_id, :from_name, :to_id, :thread_id, :reply_to, :body, "
-                ":idempotency_key, :delivery, :sig)",
+                "INSERT INTO messages(id, ts, from_id, from_name, to_id, thread_id, reply_to, body, delivery, sig) "
+                "VALUES (:id, :ts, :from_id, :from_name, :to_id, :thread_id, :reply_to, :body, :delivery, :sig)",
                 row,
             )
 

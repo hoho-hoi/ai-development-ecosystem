@@ -72,6 +72,8 @@ from .workspace import prepare_workspace
 log = logging.getLogger(__name__)
 
 LIVE = {"preparing", "starting", "idle", "busy", "active"}
+# Seconds to wait before handing a message to another place again.
+REMOTE_RETRY_DELAYS = (0.5, 2.0)
 SESSION_ID_RE = re.compile(r"^(s-[0-9a-f]{16}|operator)$")
 
 
@@ -723,15 +725,11 @@ class SessionManager:
         body: str,
         thread_id: str | None = None,
         reply_to: str | None = None,
-        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Put a message in the target's mailbox (here or at another place) and
         return at once. Without `to`, a reply goes to the sender of the message
-        it answers."""
-        if idempotency_key:
-            existing = self.store.find_idempotent(self.address(caller), idempotency_key)
-            if existing:
-                return {"message_id": existing["id"], "thread_id": existing["thread_id"], "duplicate": True}
+        it answers. The result says whether it arrived; getting it there is the
+        place's job, not the sender's (see _deliver_remote)."""
         if to:
             ref, place = self.split(to)
         elif reply_to:
@@ -748,23 +746,20 @@ class SessionManager:
         if place is None:
             target = self.resolve(ref)
             env = self._envelope(caller, self.address(target), body, thread_id, reply_to)
-            result = self._accept(env, target, idempotency_key)
+            result = self._accept(env, target)
             self.store.record(
                 "message.send", session_id=caller.id, thread_id=thread_id, message_id=env["id"],
                 to=env["to"], body=body, reply_to=reply_to, sig=env["sig"],
             )
             return result
         env = self._envelope(caller, f"{ref}@{place}", body, thread_id, reply_to)
-        try:
-            res = await self.fed.post(place, "/federation/deliver", {"envelope": env})
-        except PlaceError as e:
-            raise (NotFound(str(e)) if e.status == 404 else Unreachable(str(e))) from None
+        res = await self._deliver_remote(place, env)
         # Keep our own copy of what we sent (for threads and replies), never unread.
         self.store.insert_message(
             {
                 "id": env["id"], "ts": env["sent_at"], "from_id": env["from"], "from_name": caller.name,
                 "to_id": res["to"], "thread_id": thread_id, "reply_to": reply_to, "body": body,
-                "idempotency_key": idempotency_key, "delivery": "remote", "sig": env["sig"],
+                "delivery": "remote", "sig": env["sig"],
             }
         )
         self.store.mark_delivered(env["id"], f"remote:{place}")
@@ -775,14 +770,34 @@ class SessionManager:
         return {"message_id": env["id"], "thread_id": thread_id, "to": res["to"],
                 "to_state": res.get("to_state"), "queued_ahead": res.get("queued_ahead")}
 
-    def _accept(self, env: dict[str, Any], target: Session, idempotency_key: str | None = None) -> dict[str, Any]:
+    async def _deliver_remote(self, place: str, env: dict[str, Any]) -> dict[str, Any]:
+        """Hand a message to another place. When the connection fails or the
+        answer is lost, send the same message (same id) again: the other place
+        takes a message id only once, so the sender never resends anything."""
+        attempts = len(REMOTE_RETRY_DELAYS) + 1
+        for n, delay in enumerate((*REMOTE_RETRY_DELAYS, None), 1):
+            try:
+                return await self.fed.post(place, "/federation/deliver", {"envelope": env})
+            except PlaceError as e:
+                if e.status == 404:
+                    raise NotFound(str(e)) from None
+                if e.status == 403:
+                    raise Forbidden(str(e)) from None
+                if e.status < 500 or delay is None:
+                    note = f" (no answer after {attempts} attempts; it may not have arrived)" if n > 1 else ""
+                    raise Unreachable(f"{e}{note}") from None
+                self.store.record("message.retry", message_id=env["id"], place=place, attempt=n, error=str(e))
+            await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
+
+    def _accept(self, env: dict[str, Any], target: Session) -> dict[str, Any]:
         """Put a (verified) message in a resident's mailbox."""
         ahead = len(self.store.unread(target.id))
         self.store.insert_message(
             {
                 "id": env["id"], "ts": env["sent_at"], "from_id": env["from"], "from_name": env.get("from_name"),
                 "to_id": target.id, "thread_id": env["thread_id"], "reply_to": env.get("reply_to"),
-                "body": env["body"], "idempotency_key": idempotency_key, "delivery": "mailbox", "sig": env["sig"],
+                "body": env["body"], "delivery": "mailbox", "sig": env["sig"],
             }
         )
         target.mail.set()

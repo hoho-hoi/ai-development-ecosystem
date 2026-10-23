@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 # Handshake-era MCP versions this server speaks. Clients that probe the
 # stateless 2026-07-28 era with server/discover get "method not found" and
 # fall back to initialize.
@@ -58,7 +58,6 @@ TOOLS: list[dict[str, Any]] = [
                 "body": {**S, "description": "Message text"},
                 "reply_to": {**S, "description": "Message id this answers"},
                 "thread_id": {**S, "description": "Continue an existing thread"},
-                "idempotency_key": {**S, "description": "Same key = delivered once"},
             },
             "required": ["body"],
         },

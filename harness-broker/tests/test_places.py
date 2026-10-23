@@ -17,6 +17,7 @@ from pathlib import Path
 
 from helpers import RunningBroker, make_repo
 
+from hbroker.federation import PlaceError
 from hbroker.identity import Key, message_bytes, request_bytes, session_id_for
 
 SECRET = "hb-secret-value-123456"
@@ -77,6 +78,37 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         sent = await self.pc1.tool("send", reply_to=got["message_id"], body="reply without to")
         self.assertEqual(sent["to"], st["address"])
         self.assertEqual((await self.reply(self.pc1, sent["message_id"], st["address"]))["body"], "echo: reply without to")
+
+    async def test_a_lost_answer_is_retried_by_the_place_not_the_sender(self):
+        st = await self.pc1.tool("spawn", profile="echo", place="pc2")
+        fed = self.pc1.broker.federation
+        real, delivered = fed.post, []
+
+        async def answer_lost_once(place, path, payload, timeout=60):
+            res = await real(place, path, payload, timeout)
+            if path == "/federation/deliver":
+                delivered.append(res)
+                if len(delivered) == 1:
+                    raise PlaceError("connection reset", 502)  # it arrived, but the answer was lost
+            return res
+
+        fed.post = answer_lost_once
+        sent = await self.pc1.tool("send", to=st["address"], body="FINAL_ONLY")
+        self.assertEqual(sent["to"], st["address"])  # the sender just sees it arrive
+        self.assertEqual([d.get("duplicate", False) for d in delivered], [False, True])
+        arrived = self.pc2.broker.store.events(kinds=["message.arrive"])
+        self.assertEqual([e["message_id"] for e in arrived], [sent["message_id"]])  # once
+        retry = self.pc1.broker.store.events(kinds=["message.retry"])
+        self.assertEqual(len(retry), 1)
+
+        # a place that stays unreachable: the sender is told, after the retries
+        async def down(place, path, payload, timeout=60):
+            raise PlaceError("connection refused", 502)
+
+        fed.post = down
+        code, body = await self.pc1.post("/api/tools/send", {"to": st["address"], "body": "x"})
+        self.assertEqual(code, 502, body)
+        self.assertIn("3 attempts", body["error"])
 
     async def test_receive_from_someone_elsewhere_sees_them_go_quiet(self):
         st = await self.pc1.tool("spawn", profile="echo", place="pc2")

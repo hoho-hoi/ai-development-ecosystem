@@ -295,7 +295,7 @@ class StoreTests(unittest.TestCase):
     def test_mailbox_filters(self):
         with tempfile.TemporaryDirectory() as t:
             st = HistoryStore(t)
-            row = {"to_id": "me", "thread_id": "t", "idempotency_key": None, "delivery": "mailbox"}
+            row = {"to_id": "me", "thread_id": "t", "delivery": "mailbox"}
             st.insert_message({**row, "id": "m1", "ts": "2026-01-02", "from_id": "a", "reply_to": None, "body": "1"})
             st.insert_message({**row, "id": "m2", "ts": "2026-01-03", "from_id": "b", "reply_to": "m9", "body": "2"})
             st.insert_message({**row, "id": "m3", "ts": "2026-01-04", "from_id": "a", "reply_to": None, "body": "3"})
