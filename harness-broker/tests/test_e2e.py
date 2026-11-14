@@ -289,8 +289,16 @@ class ModuleProfileTests(BrokerCase):
 
         # brokerTools: [send] -> the bridge offers send only, and the broker enforces it
         _, r = await self.ask(sid, "MCP")
-        env = {e["name"]: e["value"] for e in json.loads(r["body"])[0]["env"]}
+        servers = json.loads(r["body"])
+        env = {e["name"]: e["value"] for e in servers[0]["env"]}
         self.assertEqual(env["HB_TOOLS"], "send")
+        # the module's own MCP server, pointing at the module copied into the session
+        tool = servers[1]
+        self.assertEqual(tool["name"], "tool")
+        root = tool["args"][1]
+        self.assertEqual(tool["command"], f"{root}/bin/tool")
+        _, r = await self.ask(sid, f"READ {root}/bin/tool")
+        self.assertEqual(json.loads(r["body"]), "#!/bin/sh\n")
         _, r = await self.ask(sid, 'BRIDGE spawn {"profile": "echo"}')
         self.assertEqual(json.loads(r["body"])["rpc_error"]["code"], -32602)  # not offered
         token = self.b.broker.manager.sessions[sid].token
@@ -300,29 +308,31 @@ class ModuleProfileTests(BrokerCase):
 
         # module source and file hashes are in the history
         mod = (await self.b.tool("history", session=sid, kinds=["session.module"]))["events"][0]["payload"]
-        self.assertEqual(mod["spec"]["id"], "mod")
-        self.assertIn("AGENTS.md", mod["files"])
+        self.assertEqual(mod["plugin"]["name"], "mod")
+        self.assertIn("io.github.hoho-hoi.agora/AGENTS.md", mod["files"])
 
     async def test_no_broker_tools_means_no_bridge(self):
         st = await self.b.tool("spawn", profile="notools", wait=True)
         sent = await self.b.tool("send", to=st["id"], body="MCP")
         r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
         self.assertEqual((r["messages"], r["from_quiet"]), ([], True))  # it cannot answer at all
-        self.assertEqual(json.loads(await self.turn_text(st["id"], sent["message_id"])), [])
+        # no bridge: only the module's own MCP server
+        servers = json.loads(await self.turn_text(st["id"], sent["message_id"]))
+        self.assertEqual([m["name"] for m in servers], ["tool"])
 
     async def test_repo_module_pinned_by_commit(self):
         profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
-        self.assertEqual(profiles["modlocal"]["name"], "Test module")
+        self.assertEqual(profiles["modlocal"]["name"], "mod")
         self.assertIn("not fetched yet", profiles["modrepo"]["description"])
         st = await self.b.tool("spawn", profile="modrepo", wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
         self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the peer.\n")
         mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
-        self.assertEqual(mod["source"]["path"], "requirements/peer")
+        self.assertEqual(mod["source"]["path"], "peer")
         self.assertEqual(len(mod["source"]["ref"]), 40)
         profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
-        self.assertEqual(profiles["modrepo"]["name"], "Peer")  # cached now
+        self.assertEqual(profiles["modrepo"]["name"], "peer")  # cached now
 
     async def test_receive_wait_is_bounded_and_filters(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)

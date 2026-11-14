@@ -63,22 +63,31 @@ def make_repo(root: Path) -> tuple[Path, str, str]:
     return repo, commit_a, commit_b
 
 
+PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+NS = "io.github.hoho-hoi.agora"
+
+
+def plugin_json(name: str, description: str = "", **extra) -> str:
+    return json.dumps({"$schema": PLUGIN_SCHEMA, "name": name, "description": description, **extra})
+
+
 def make_module_repo(root: Path) -> tuple[Path, str]:
-    """A module repository: execution/ is the module, plus a second module
-    under requirements/peer. Returns (repo, commit)."""
+    """A repository with two modules (Agent Plugins with agora's extension):
+    agent/ (instructions, a skill and an MCP server) and peer/, plus a file
+    outside both. Returns (repo, commit)."""
     repo = root / "module-repo"
     files = {
-        "execution/module.json": json.dumps(
-            {"schemaVersion": 1, "id": "mod", "name": "Test module", "description": "a module for tests",
-             "instructions": "AGENTS.md"}
-        ),
-        "execution/AGENTS.md": "You are the test module.\n",
-        "execution/skills/mod-skill/SKILL.md": "---\nname: mod-skill\ndescription: test\n---\n",
-        "requirements/peer/module.json": json.dumps(
-            {"schemaVersion": 1, "id": "peer", "name": "Peer", "description": "peer module", "instructions": "AGENTS.md"}
-        ),
-        "requirements/peer/AGENTS.md": "You are the peer.\n",
-        "requirements/purpose.md": "never given to the agent\n",
+        "agent/plugin.json": plugin_json("mod", "a module for tests", version="1.2.0"),
+        f"agent/{NS}/AGENTS.md": "You are the test module.\n",
+        "agent/skills/mod-skill/SKILL.md": "---\nname: mod-skill\ndescription: test\n---\n",
+        "agent/mcp.json": json.dumps({"$schema": MCP_SCHEMA, "mcpServers": {
+            "tool": {"type": "stdio", "command": "./bin/tool", "args": ["--root", "${PLUGIN_ROOT}"],
+                     "env": {"MODE": "x"}}}}),
+        "agent/bin/tool": "#!/bin/sh\n",
+        "peer/plugin.json": plugin_json("peer", "peer module"),
+        f"peer/{NS}/AGENTS.md": "You are the peer.\n",
+        "docs/purpose.md": "never given to the agent\n",
     }
     for rel, text in files.items():
         f = repo / rel
@@ -156,33 +165,33 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
         rt = {k: v for k, v in base["runtime"].items() if k not in ("instructions", "bundledSkills")}
         profiles["modlocal"] = {
             "id": "modlocal", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "execution"},
+            "module": {"local": str(mrepo), "path": "agent"},
             "runtime": {**rt, "sessionMode": "per_message", "brokerTools": ["send"],
                         "permissions": {"mode": "deny", "deniedTools": ["Bash", "WebSearch"]}},
             "limits": base["limits"],
         }
         profiles["modrepo"] = {
             "id": "modrepo", "version": "1.0.0",
-            "module": {"repo": str(mrepo), "ref": mcommit, "path": "requirements/peer"},
+            "module": {"repo": str(mrepo), "ref": mcommit, "path": "peer"},
             "runtime": {**rt, "brokerTools": ["send", "receive"]},
             "limits": base["limits"],
         }
         profiles["codexplan"] = {
             "id": "codexplan", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "execution"},
+            "module": {"local": str(mrepo), "path": "agent"},
             "runtime": {**rt, "harness": "codex", "login": "chatgpt", "secrets": [],
                         "permissions": {"mode": "deny"}},
             "limits": base["limits"],
         }
         profiles["noload"] = {  # a harness that cannot resume a conversation
             "id": "noload", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "execution"},
+            "module": {"local": str(mrepo), "path": "agent"},
             "runtime": {**rt, "env": {"FAKE_NO_LOAD": "1"}},
             "limits": base["limits"],
         }
         profiles["notools"] = {
             "id": "notools", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "execution"},
+            "module": {"local": str(mrepo), "path": "agent"},
             "runtime": {**rt, "brokerTools": False},
             "limits": base["limits"],
         }

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
-from .modules import ModuleCache
+from .modules import ModuleCache, ResolvedModule
 from .profiles import Profile
 
 
@@ -105,13 +106,22 @@ def prepare_harness_config(
     return env
 
 
-def resolve_definition(profile: Profile, cache: "ModuleCache") -> tuple[str | None, list[Path], dict | None]:
-    """(instructions, skill dirs, module manifest) for a profile."""
+@dataclass
+class Definition:
+    """What the agent is: from the profile's module, or its inline definition."""
+
+    instructions: str | None
+    skill_dirs: list[Path]
+    manifest: dict | None = None  # the module's source, plugin.json and file hashes
+    module: ResolvedModule | None = None
+
+
+def resolve_definition(profile: Profile, cache: "ModuleCache") -> Definition:
     if profile.module:
         base = profile.source.parent if profile.source else None
         mod = cache.resolve(profile.module, base)
-        return mod.instructions_text(), mod.skill_dirs(), mod.manifest()
-    return profile.instructions_text(), profile.skill_dirs(), None
+        return Definition(mod.instructions_text(), mod.skill_dirs(), mod.manifest(), mod)
+    return Definition(profile.instructions_text(), profile.skill_dirs())
 
 
 # Files in a harness dir that hold credentials: never collected into history.

@@ -533,12 +533,18 @@ class SessionManager:
                 self.store.record("session.workspace", session_id=s.id, cloned_from=s.meta.get("cloned_from"))
             ws_path, hb_path = self.runner.runtime_paths(bundle)
             (bundle / "hb").mkdir()
-            instructions, skill_dirs, module_manifest = await asyncio.to_thread(
-                resolve_definition, profile, self.modules
+            definition = await asyncio.to_thread(resolve_definition, profile, self.modules)
+            module_mcp: list[dict[str, Any]] = []
+            if definition.module:
+                self.store.record("session.module", session_id=s.id, **definition.manifest)
+                # The whole module goes into the session, so its MCP servers can run from it.
+                await asyncio.to_thread(
+                    shutil.copytree, definition.module.directory, bundle / "hb" / "module", symlinks=True
+                )
+                module_mcp = definition.module.mcp_servers(f"{hb_path}/module")
+            env = prepare_harness_config(
+                profile, bundle / "hb", hb_path, definition.instructions, definition.skill_dirs
             )
-            if module_manifest:
-                self.store.record("session.module", session_id=s.id, **module_manifest)
-            env = prepare_harness_config(profile, bundle / "hb", hb_path, instructions, skill_dirs)
             if seed is not None and seed.exists():
                 # The source's records, but this body's own config (instructions, settings, skills).
                 target = bundle / "hb" / harness_record_dir(profile)
@@ -612,6 +618,11 @@ class SessionManager:
                 }
                 for m in profile.runtime.mcp_servers
             ]
+            names = [m["name"] for m in mcp_servers]
+            clash = sorted({m["name"] for m in module_mcp} & set(names))
+            if clash:
+                raise BrokerError(f"the module's MCP servers clash with the profile's: {', '.join(clash)}")
+            mcp_servers += module_mcp
             s.mcp_servers = mcp_servers
             if load:
                 if not (s.acp.agent_info.get("agentCapabilities") or {}).get("loadSession"):

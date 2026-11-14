@@ -20,7 +20,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from .modules import ModuleCache, check_relative, read_spec
+from .modules import ModuleCache, check_relative, read_plugin
 
 # Files and directories removed from every workspace, at any depth, unless the
 # profile overrides the list. These are where harnesses pick up project-level
@@ -83,7 +83,7 @@ class ModuleRef(_Model):
     repo: str | None = None
     ref: str | None = None
     local: str | None = None
-    path: str = "execution"
+    path: str = "."  # the module directory inside the repo; default its root
 
     @model_validator(mode="after")
     def _one_source(self) -> "ModuleRef":
@@ -223,7 +223,7 @@ class Profile(_Model):
 
     _source: Path | None = PrivateAttr(default=None)
     _fingerprint: str = PrivateAttr(default="")
-    _module_spec: Any = PrivateAttr(default=None)  # ModuleSpec when known without fetching
+    _module_plugin: Any = PrivateAttr(default=None)  # PluginManifest when known without fetching
 
     @field_validator("id")
     @classmethod
@@ -265,16 +265,16 @@ class Profile(_Model):
 
     @property
     def display_name(self) -> str:
-        spec = self._module_spec
-        return self.name or (spec.name if spec else self.id)
+        plugin = self._module_plugin
+        return self.name or (plugin.name if plugin else self.id)
 
     @property
     def display_description(self) -> str:
-        spec = self._module_spec
+        plugin = self._module_plugin
         if self.description:
             return self.description
-        if spec:
-            return spec.description
+        if plugin:
+            return plugin.description
         assert self.module is not None
         return f"(module {self.module.repo}@{(self.module.ref or '')[:12]} not fetched yet)"
 
@@ -316,13 +316,13 @@ def _finish(profile: Profile, source: Path | None, cache: Any = None) -> Profile
         # A local module can change under the profile, so its files are part
         # of the fingerprint (a repo module is pinned by its commit).
         mod = ModuleCache(Path("/nonexistent")).resolve(profile.module, source.parent if source else None)
-        profile._module_spec = mod.spec
+        profile._module_plugin = mod.plugin
         h.update(json.dumps(mod.files, sort_keys=True).encode())
     elif profile.module and cache is not None:
         done = cache.cached(profile.module.repo, profile.module.ref)
         if done:
             try:
-                profile._module_spec = read_spec(done / profile.module.path)
+                profile._module_plugin = read_plugin(done / profile.module.path)
             except Exception:
                 pass
     if profile.runtime.instructions:

@@ -156,24 +156,38 @@ hb call clone '{"session": "reviewer", "name": "reviewer-b"}' --config hb.yaml
 
 ## モジュール
 
-モジュールは `module.json` を持つディレクトリです。
+モジュールは、1つのエージェントを作るのに必要な情報（指示・skill・MCP サーバー）をまとめたディレクトリです。Docker でいう Dockerfile にあたり、それをどの環境で動かすかはプロファイルが決めます。
+
+形式は [Agent Plugins](https://agent-plugins.org/specification) 1.0.0 です。目印はルートの `plugin.json` で、Agent Plugins が扱わない「指示」だけを、規格どおり hb 専用の拡張名前空間 `io.github.hoho-hoi.agora` に置きます。
+
+```
+my-module/
+├── plugin.json                         # 目印（必須）
+├── skills/<名前>/SKILL.md              # Agent Skills（skills/ の直下だけ）
+├── mcp.json                            # MCP サーバー（任意）
+└── io.github.hoho-hoi.agora/AGENTS.md  # 指示（任意）
+```
 
 ```json
 {
-  "schemaVersion": 1,
-  "id": "akinator",
-  "name": "アキネーター（質問役）",
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "akinator",
+  "version": "2.0.0",
   "description": "呼び出す側が読む用途の説明",
-  "instructions": "AGENTS.md"
+  "extensions": {
+    "io.github.hoho-hoi.agora": { "instructions": "AGENTS.md" }
+  }
 }
 ```
 
-- `instructions` のファイルがハーネスの指示（Claude Code なら `CLAUDE.md`、Codex なら `AGENTS.md`）として配置されます。
-- `skills/<name>/SKILL.md` があれば skill として配置されます（`skills` で場所を変更可）。
-- モジュールのディレクトリの外のファイル（requirements、evaluations など）はエージェントに渡りません。
+- **plugin.json**：Agent Plugins の閉じたスキーマに従います（`$schema`・`name`・`version`・`description`・`author`・`homepage`・`repository`・`license`・`keywords`・`extensions` のみ）。`name` と `description` は、プロファイルで省いたときの名前と説明になります。
+- **指示**：`io.github.hoho-hoi.agora/AGENTS.md`（拡張の `instructions` で名前空間内の別のファイルにできます）。ハーネスの指示ファイル（Claude Code なら `CLAUDE.md`、Codex なら `AGENTS.md`）として配置します。ほかのクライアントはこの名前空間を無視し、skill と MCP だけを使います。
+- **skill**：`skills/` の直下のディレクトリだけを読みます。`SKILL.md` の `name` はディレクトリ名と同じにします。
+- **MCP サーバー**（`mcp.json`）：`stdio` と `http`（`streamable-http`）に対応します。モジュール全体をセッションの中に写し、`${PLUGIN_ROOT}` と `./` で始まる `command` をその場所に置き換えて、ACP の `session/new` で渡します。`command` は1つの実行ファイル（コマンドラインは不可）、`cwd` は使えません（ACP にない）、リモートは https のみ、名前 `hb` はブリッジ用に予約しています。
+- サブエージェントは持ちません。別のエージェントが必要なら、hb で別のセッションを起こして話します。
+- モジュールのディレクトリの外のファイルはエージェントに渡りません。リポジトリのどこに何を置くかは利用者の自由です。
 - ハーネスやモデルの設定はモジュールに置きません。それはプロファイルの役目です。
-
-実例：[ysgrProgramming/akinator](https://github.com/ysgrProgramming/akinator)（`execution/` と `requirements/answerer/`）、[ysgrProgramming/romaji-converter](https://github.com/ysgrProgramming/romaji-converter)（`execution/`）。
+- 以前の `module.json` は読みません（見つかると移行を促すエラーになります）。
 
 ## プロファイル
 
@@ -182,7 +196,7 @@ hb call clone '{"session": "reviewer", "name": "reviewer-b"}' --config hb.yaml
 | フィールド | 内容 |
 | --- | --- |
 | `id` / `version` / `name` / `description` / `skills` | Agent Card 互換。`list_profiles` で返す。モジュールを使う場合、`name` と `description` は省略するとモジュールのものになる |
-| `module.repo` / `ref` / `path` | モジュールのリポジトリ、コミット SHA（ブランチ名は拒否）、リポジトリ内のディレクトリ（既定 `execution`）。コミットごとに一度だけ取得してキャッシュする |
+| `module.repo` / `ref` / `path` | モジュールのリポジトリ、コミット SHA（ブランチ名は拒否）、リポジトリ内のディレクトリ（既定はリポジトリのルート）。コミットごとに一度だけ取得してキャッシュする |
 | `module.local` / `path` | 開発用。手元のディレクトリを使う。中身のハッシュが fingerprint に入る |
 | `spawnableBy` | 起動を許す相手。`external`、`*`、またはプロファイル id |
 | `runtime.harness` | `claude-code` / `codex` / `gemini` / `custom` |

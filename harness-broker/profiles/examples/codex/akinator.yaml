@@ -6,6 +6,8 @@
 #   3. set runtime.model to a model your plan offers (see /model in codex)
 id: akinator
 version: 2.0.0
+# NOTE: this commit still describes the module with module.json, which is no longer read.
+# Move ref to a commit whose module has a plugin.json (see README "モジュール").
 module:
   repo: https://github.com/ysgrProgramming/akinator.git
   ref: e7765973892141361c886dd511e6d62e759154b9

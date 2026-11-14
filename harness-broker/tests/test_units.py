@@ -4,12 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import FAKE_DIGEST, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo, write_profiles
+from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_DIGEST, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo, write_profiles
 
 from hbroker.acp_client import decide_permission
 from hbroker.harness import prepare_harness_config, resolve_definition
 from hbroker.logins import LoginError, load_chatgpt_login, write_access_only
-from hbroker.modules import ModuleCache, load_local, read_spec
+from hbroker.modules import ModuleCache, load_local
 from hbroker.profiles import DEFAULT_STRIP, Permissions, load_profile, profile_from_dict
 from hbroker.runner.docker import build_create_args, pack_bundle
 from hbroker.store import HistoryStore
@@ -127,9 +127,16 @@ class HarnessConfigTests(unittest.TestCase):
 
 
 class ModuleTests(unittest.TestCase):
+    def write(self, root: Path, files: dict[str, str]) -> Path:
+        for rel, text in files.items():
+            f = root / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text)
+        return root
+
     def test_module_ref_validation(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
-            profile_from_dict(minimal(module={"path": "execution"}))
+            profile_from_dict(minimal(module={"path": "agent"}))
         with self.assertRaisesRegex(ValueError, "full commit SHA"):
             profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "main"}))
         with self.assertRaisesRegex(ValueError, "relative path"):
@@ -142,17 +149,25 @@ class ModuleTests(unittest.TestCase):
             del data["name"]
             profile_from_dict(data)
 
+    def test_module_path_defaults_to_repository_root(self):
+        self.assertEqual(profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40})).module.path, ".")
+        with tempfile.TemporaryDirectory() as t:
+            m = self.write(Path(t), {"plugin.json": plugin_json("root", "at the root")})
+            data = minimal(module={"local": str(m)})
+            del data["name"], data["description"]
+            self.assertEqual(profile_from_dict(data).agent_card()["name"], "root")
+
     def test_local_module_names_and_fingerprint(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             mrepo, _ = make_module_repo(t)
-            data = minimal(module={"local": str(mrepo)})
+            data = minimal(module={"local": str(mrepo), "path": "agent"})
             del data["name"], data["description"]
             p = profile_from_dict(data)
-            self.assertEqual(p.agent_card()["name"], "Test module")
+            self.assertEqual(p.agent_card()["name"], "mod")
             self.assertEqual(p.agent_card()["description"], "a module for tests")
             before = p.fingerprint
-            (mrepo / "execution" / "AGENTS.md").write_text("changed\n")
+            (mrepo / "agent" / NS / "AGENTS.md").write_text("changed\n")
             self.assertNotEqual(before, profile_from_dict(data).fingerprint)
 
     def test_repo_module_fetch_and_definition(self):
@@ -160,43 +175,107 @@ class ModuleTests(unittest.TestCase):
             t = Path(t)
             mrepo, commit = make_module_repo(t)
             cache = ModuleCache(t / "cache")
-            bare = minimal(module={"repo": str(mrepo), "ref": commit})
+            ref = {"repo": str(mrepo), "ref": commit, "path": "agent"}
+            bare = minimal(module=ref)
             del bare["description"]
             self.assertIn("not fetched yet", profile_from_dict(bare, cache=cache).agent_card()["description"])
-            p = profile_from_dict(minimal(module={"repo": str(mrepo), "ref": commit}), cache=cache)
-            instructions, skills, manifest = resolve_definition(p, cache)
-            self.assertEqual(instructions, "You are the test module.\n")
-            self.assertEqual([d.name for d in skills], ["mod-skill"])
-            self.assertEqual(manifest["source"]["ref"], commit)
-            self.assertIn("AGENTS.md", manifest["files"])
-            self.assertNotIn("../requirements/purpose.md", manifest["files"])
+            p = profile_from_dict(minimal(module=ref), cache=cache)
+            d = resolve_definition(p, cache)
+            self.assertEqual(d.instructions, "You are the test module.\n")
+            self.assertEqual([x.name for x in d.skill_dirs], ["mod-skill"])
+            self.assertEqual(d.manifest["source"]["ref"], commit)
+            self.assertEqual(d.manifest["plugin"]["version"], "1.2.0")
+            self.assertIn(f"{NS}/AGENTS.md", d.manifest["files"])
+            self.assertNotIn("../docs/purpose.md", d.manifest["files"])
             # cached now: the registry shows the module's own name
-            p2 = profile_from_dict(minimal(module={"repo": str(mrepo), "ref": commit}), cache=cache)
+            p2 = profile_from_dict(minimal(module=ref), cache=cache)
             self.assertEqual(p2.agent_card()["description"], "d")  # profile description wins
-            data = minimal(module={"repo": str(mrepo), "ref": commit})
+            data = minimal(module=ref)
             del data["description"]
             self.assertEqual(profile_from_dict(data, cache=cache).agent_card()["description"], "a module for tests")
+
+    def test_plugin_json_is_the_marker_and_is_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            with self.assertRaisesRegex(ValueError, "plugin.json not found"):
+                load_local(self.write(t / "a", {"AGENTS.md": "x"}), {})
+            old = self.write(t / "b", {"module.json": json.dumps({"schemaVersion": 1, "id": "m", "name": "m"})})
+            with self.assertRaisesRegex(ValueError, "module.json is no longer supported"):
+                load_local(old, {})
+            bad = {
+                "c": json.dumps({"$schema": PLUGIN_SCHEMA, "name": "m", "hooks": "hooks.json"}),  # closed schema
+                "d": json.dumps({"$schema": "https://example.com/other.json", "name": "m"}),
+                "e": json.dumps({"$schema": PLUGIN_SCHEMA, "name": "Bad Name"}),
+                "f": json.dumps({"$schema": PLUGIN_SCHEMA, "name": "a--b"}),
+                "g": plugin_json("m", extensions={NS: {"unknown": 1}}),
+            }
+            for d, text in bad.items():
+                with self.subTest(d), self.assertRaises(ValueError):
+                    load_local(self.write(t / d, {"plugin.json": text}), {})
+            # other clients' extensions are ignored
+            ok = self.write(t / "h", {"plugin.json": plugin_json("m", extensions={"com.vendor.x": {"a": 1}})})
+            self.assertIsNone(load_local(ok, {}).instructions_text())
+
+    def test_instructions_from_the_extension(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            m = self.write(t / "m", {"plugin.json": plugin_json("m", extensions={NS: {"instructions": "role.md"}}),
+                                     f"{NS}/role.md": "role"})
+            self.assertEqual(load_local(m, {}).instructions_text(), "role")
+            missing = self.write(t / "n", {"plugin.json": plugin_json("m", extensions={NS: {"instructions": "x.md"}})})
+            with self.assertRaisesRegex(ValueError, "instructions not found"):
+                load_local(missing, {})
 
     def test_module_instructions_cannot_escape(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
-            (t / "m").mkdir()
-            (t / "m" / "module.json").write_text(json.dumps(
-                {"schemaVersion": 1, "id": "m", "name": "m", "instructions": "../secret.md"}))
+            m = self.write(t / "m", {"plugin.json": plugin_json("m", extensions={NS: {"instructions": "../../secret.md"}})})
             with self.assertRaises(ValueError):
-                read_spec(t / "m")
+                load_local(m, {})
+
+    def test_skill_name_must_match_its_directory(self):
+        with tempfile.TemporaryDirectory() as t:
+            m = self.write(Path(t), {"plugin.json": plugin_json("m"),
+                                     "skills/one/SKILL.md": "---\nname: two\ndescription: x\n---\n"})
+            with self.assertRaisesRegex(ValueError, "name"):
+                load_local(m, {})
 
     def test_skill_symlink_cannot_escape(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             (t / "secret").mkdir()
             (t / "secret" / "key").write_text("s3cret")
-            m = t / "m"
-            (m / "skills").mkdir(parents=True)
-            (m / "module.json").write_text(json.dumps({"schemaVersion": 1, "id": "m", "name": "m"}))
+            m = self.write(t / "m", {"plugin.json": plugin_json("m")})
+            (m / "skills").mkdir()
             (m / "skills" / "evil").symlink_to(t / "secret")
             with self.assertRaisesRegex(ValueError, "outside the module"):
-                load_local(m, {"local": str(m)})
+                load_local(m, {})
+
+    def test_mcp_servers_from_mcp_json(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            mrepo, _ = make_module_repo(t)
+            mod = load_local(mrepo / "agent", {})
+            self.assertEqual(
+                mod.mcp_servers("/rt/module"),
+                [{"name": "tool", "command": "/rt/module/bin/tool", "args": ["--root", "/rt/module"],
+                  "env": [{"name": "MODE", "value": "x"}]}],
+            )
+            remote = self.write(t / "r", {"plugin.json": plugin_json("r"), "mcp.json": json.dumps(
+                {"$schema": MCP_SCHEMA, "mcpServers": {"web": {"type": "http", "url": "https://mcp.example.com/mcp"}}})})
+            self.assertEqual(load_local(remote, {}).mcp_servers("/x"),
+                             [{"type": "http", "name": "web", "url": "https://mcp.example.com/mcp", "headers": []}])
+            bad = {
+                "reserved": {"agora": {"type": "stdio", "command": "x"}},
+                "shell": {"s": {"type": "stdio", "command": "node server.js"}},
+                "cwd": {"s": {"type": "stdio", "command": "x", "cwd": "${PLUGIN_ROOT}"}},
+                "plain-http": {"s": {"type": "http", "url": "http://example.com/mcp"}},
+                "type": {"s": {"type": "sse", "url": "https://example.com"}},
+            }
+            for d, servers in bad.items():
+                with self.subTest(d), self.assertRaises(ValueError):
+                    load_local(self.write(t / d, {"plugin.json": plugin_json("m"), "mcp.json": json.dumps(
+                        {"$schema": MCP_SCHEMA, "mcpServers": servers})}), {})
 
     def test_denied_tools_in_claude_settings(self):
         with tempfile.TemporaryDirectory() as t:
