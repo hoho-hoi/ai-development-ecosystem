@@ -1,0 +1,22 @@
+# romaji-converter on OpenCode with a free OpenCode Zen model (no API key).
+# Free models are served only to the OpenCode harness. Pick one whose
+# provider keeps zero retention (see README "OpenCode で動かす").
+id: romaji-converter
+version: 3.0.0
+module:
+  repo: https://github.com/ysgrProgramming/romaji-converter.git
+  ref: 415852ed829e239ecc6d492de54eac877cb04580
+  path: execution
+spawnableBy: [external, "*"]
+runtime:
+  harness: opencode
+  adapter: [opencode, acp]
+  model: opencode/deepseek-v4.1-flash-free
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  sessionMode: per_message
+  brokerTools: [send]
+  permissions: {mode: deny}
+# Only where containers reach the internet through an HTTP proxy:
+# network:
+#   proxy: http://172.18.0.1:3128
+limits: {maxRuntimeMinutes: 10, maxSpawnDepth: 0}

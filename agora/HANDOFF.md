@@ -37,6 +37,17 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## 実モデルでの確認（2026-11-15、v0.7.1 + module_ref）
+
+OpenCode Zen の無料モデル（API キー不要）で、クラウド環境の Docker ランナーを使って確かめた。
+
+- **単体**：romaji-converter（`opencode/big-pickle`、`deepseek-v4.1-flash-free`、`glm-5.3-flash-free`）に依頼し、変換結果が `send` で返ってきた（6〜37秒）。要件どおり typo（ikimast）は直さず、shin'you は「信用」になった。
+- **セッションからセッション**：caller（OpenCode、big-pickle）に依頼すると、`list_profiles` → `spawn`（romaji-opencode、依頼の本文をそのまま task に）→ `receive` → `send` → `terminate` の順に動き、操作者に変換結果が届いた。子のセッションの親は caller と記録された。
+- 本物のモデルが「最後の文章ではなく `send` で返す」ことと、`permissions: deny` でも OpenCode では agora のツールが使えることを確認した。
+- 無料モデルの条件（OpenCode Console の文書）：期間限定。Big Pickle・Iceman・Inkling 2 Small・Flint 40B・MiMo・Nemotron は収集データを改善や学習に使う。GLM-5.3-Flash・DeepSeek V4.1 Flash・MiniMax M3.1 Flash・LongCat 2.5（1日100リクエスト、中国でホスト）は提供元がゼロリテンション。無料モデルは OpenCode からのみ使える。
+- **クラウド環境の注意**：このクラウドのコンテナは、セッションのプロキシ（127.0.0.1 の HTTPS CONNECT プロキシ）に直接届かない。Docker ネットワークのゲートウェイ（172.18.0.1:3128）からそのプロキシへの TCP 中継を動かし、プロファイルの `network.proxy` に指定した。イメージはプロキシの CA を信頼するベース（環境専用、リポジトリ外）から作った。環境の許可ホストに `deb.debian.org` と `opencode.ai` を追加した。
+- Claude（Haiku 5.5）での確認は、Anthropic の認証をこのクラウド環境に置けないため未実施。
+
 ## v0.7.1（2026-11-15）：OpenCode のアダプタ、モデルの確認、実機での起動
 
 - **実機**：クラウド環境で `dockerd` を起動し、`images/claude-code`（claude-agent-acp 0.75.1）と `images/opencode`（@opencode/cli 2.3.0）をビルドした。どちらも agora から起動して ACP の `session/new` まで通った（モデルの呼び出しは認証待ち）。この環境のプロキシは https の CONNECT しか通さないので、ビルドには apt を https にした環境専用のベースイメージを使った（リポジトリには入れていない）。

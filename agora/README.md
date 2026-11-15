@@ -241,6 +241,8 @@ runtime:
 - `OPENCODE_CONFIG`・`OPENCODE_CONFIG_DIR` をそこに向け、プロジェクトの設定と CLAUDE.md 系の読み込み、自動更新を切り、XDG のディレクトリもセッションの中にします。ホストの `~/.config/opencode` や認証情報は読みません。
 - ツールの許可は、ほかのハーネスと同じく ACP の権限要求に `runtime.permissions` で答えます。
 - provider の認証情報がないと、OpenCode は無料の別モデルで始めようとします。agora はそれを検出して起動を失敗させます。
+- **無料モデル**：OpenCode Zen には期間限定の無料モデルがあり、API キーなしで使えます（`opencode/<名前>`。無料モデルは OpenCode のハーネスからだけ使える）。提供元がデータを保持・学習に使うものがあるので、ゼロリテンションと明記されたもの（`deepseek-v4.1-flash-free`、`glm-5.3-flash-free`、`minimax-m3.1-flash-free` など）を選びます。条件は OpenCode の Console 文書の「Free models」「Privacy」で確かめてください。例：[profiles/examples/opencode/](profiles/examples/opencode)。
+- コンテナが HTTP プロキシ経由でしか外に出られない環境では、`network.proxy` を指定します（`HTTPS_PROXY` として渡ります。ブリッジの agora への通信はプロキシを通りません）。
 
 ## Codex を ChatGPT プランで動かす
 

@@ -1,0 +1,16 @@
+# caller on OpenCode with a free model: picks a registered profile, spawns it,
+# relays the answer. Verified with romaji-converter.yaml in this directory.
+id: caller
+version: 1.0.0
+module:
+  local: ../../../examples/modules/caller
+spawnableBy: [external]
+runtime:
+  harness: opencode
+  adapter: [opencode, acp]
+  model: opencode/deepseek-v4.1-flash-free
+  image: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  sessionMode: per_message
+  brokerTools: [list_profiles, spawn, receive, send, terminate]
+  permissions: {mode: deny}
+limits: {maxRuntimeMinutes: 20, maxSpawnDepth: 1, maxConcurrent: 2}
