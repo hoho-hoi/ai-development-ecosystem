@@ -189,6 +189,18 @@ def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST
             "runtime": {**rt, "env": {"FAKE_NO_LOAD": "1"}},
             "limits": base["limits"],
         }
+        profiles["pickmodel"] = {  # the harness starts on another model but offers the profile's
+            "id": "pickmodel", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "agent"},
+            "runtime": {**rt, "env": {"FAKE_MODELS": "other-model,test-model-1", "FAKE_CURRENT": "other-model"}},
+            "limits": base["limits"],
+        }
+        profiles["nomodel"] = {  # the harness does not offer the profile's model at all
+            "id": "nomodel", "version": "1.0.0",
+            "module": {"local": str(mrepo), "path": "agent"},
+            "runtime": {**rt, "env": {"FAKE_MODELS": "other-model", "FAKE_CURRENT": "other-model"}},
+            "limits": base["limits"],
+        }
         profiles["notools"] = {
             "id": "notools", "version": "1.0.0",
             "module": {"local": str(mrepo), "path": "agent"},

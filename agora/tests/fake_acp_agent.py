@@ -16,6 +16,7 @@ The reply is "echo: <body>", except for these bodies:
                        reply with the outcome as JSON
     ENV                reply with JSON describing the environment it runs in
     MCP                reply with the mcpServers it was given
+    MODEL              reply with the model selected for the session (FAKE_MODELS / FAKE_CURRENT)
     RAW                reply with the exact prompt text
     SESSION            reply with the ACP session id and prompt count
     INSTRUCTIONS       reply with the instruction/skill/settings files it sees
@@ -91,6 +92,13 @@ def load_session(rid, params):
             write({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {
                 "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": e["prompt"]}}}})
     write({"jsonrpc": "2.0", "id": rid, "result": {}})
+
+
+def model_options():
+    values = os.environ["FAKE_MODELS"].split(",")
+    current = state.get("model") or os.environ.get("FAKE_CURRENT", values[0])
+    return [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": current,
+             "options": [{"value": v, "name": v} for v in values]}]
 
 
 def parse(text):
@@ -242,6 +250,8 @@ def handle_prompt(rid, params):
         state["memory"].setdefault(sid, []).append(item)
         transcript({"session": sid, "remember": item})
         reply = "remembered: " + item
+    elif body == "MODEL":
+        reply = json.dumps(state.get("model") or os.environ.get("FAKE_CURRENT"))
     elif body == "MEMORY":
         reply = json.dumps({"session": sid, "memory": state["memory"].get(sid, []), "loaded": state["loaded"]})
     elif body.startswith("WRITE "):
@@ -291,7 +301,14 @@ def main():
         elif method == "session/new":
             state["mcp"] = params.get("mcpServers")
             state["sessions"] += 1
-            write({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": f"fake-session-{state['sessions']}"}})
+            result = {"sessionId": f"fake-session-{state['sessions']}"}
+            if os.environ.get("FAKE_MODELS"):  # report a model choice, like real adapters
+                result["configOptions"] = model_options()
+            write({"jsonrpc": "2.0", "id": rid, "result": result})
+        elif method == "session/set_config_option":
+            if params.get("configId") == "model":
+                state["model"] = params.get("value")
+            write({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": model_options()}})
         elif method == "session/load":
             load_session(rid, params)
         elif method == "session/close":

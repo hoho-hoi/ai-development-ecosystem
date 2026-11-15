@@ -201,9 +201,9 @@ my-module/
 | `module.repo` / `ref` / `path` | モジュールのリポジトリ、コミット SHA（ブランチ名は拒否）、リポジトリ内のディレクトリ（既定はリポジトリのルート）。コミットごとに一度だけ取得してキャッシュする |
 | `module.local` / `path` | 開発用。手元のディレクトリを使う。中身のハッシュが fingerprint に入る |
 | `spawnableBy` | 起動を許す相手。`external`、`*`、またはプロファイル id |
-| `runtime.harness` | `claude-code` / `codex` / `gemini` / `custom` |
+| `runtime.harness` | `claude-code` / `codex` / `opencode` / `gemini` / `custom` |
 | `runtime.adapter` | コンテナ内で起動する ACP アダプタのコマンド |
-| `runtime.model` | モデル ID（固定値） |
+| `runtime.model` | モデル ID（固定値）。ハーネスが ACP でモデルの選択肢を示す場合、起動時に現在のモデルを確かめ、違えばこのモデルに切り替える。選択肢にないときは、別のモデルで動かさずに起動を失敗させる（`session.model` に記録） |
 | `runtime.image` | `sha256:<image id>` または `<name>@sha256:<digest>`。タグは拒否 |
 | `runtime.instructions` / `bundledSkills` | モジュールを使わない場合の指示と skill。`module` とは併用できない |
 | `runtime.sessionMode` | `persistent`（既定。1つの会話を続ける）か `per_message`（メッセージごとに新しい会話。コンテナは同じ） |
@@ -219,6 +219,28 @@ my-module/
 既定で除去するもの：`CLAUDE.md`、`CLAUDE.local.md`、`.claude`、`.mcp.json`、`AGENTS.md`、`AGENTS.override.md`、`.codex`、`GEMINI.md`、`.gemini`
 
 `limits.maxSpawnDepth` は、そのプロファイルのセッションがさらに何段下まで spawn できるかです（0 なら spawn 不可）。親の残りの深さと場所全体の `max_spawn_depth` も超えられません。
+
+## OpenCode で動かす
+
+OpenCode V2 は自身が ACP を話す（`opencode acp`）ので、アダプタは要りません。
+
+```sh
+docker build -f images/opencode/Dockerfile -t agora/opencode .
+```
+
+```yaml
+runtime:
+  harness: opencode
+  adapter: [opencode, acp]
+  model: anthropic/claude-haiku-5-5   # OpenCode の provider/model 形式
+  image: sha256:...
+  secrets: [ANTHROPIC_API_KEY]        # provider の認証情報
+```
+
+- 設定はプロファイルとモジュールだけから作ります。エージェントを1つ（`agora`）作り、モジュールの指示をその system に、skill を `skills` に入れた `opencode.json` を、セッション専用のディレクトリに置きます。
+- `OPENCODE_CONFIG`・`OPENCODE_CONFIG_DIR` をそこに向け、プロジェクトの設定と CLAUDE.md 系の読み込み、自動更新を切り、XDG のディレクトリもセッションの中にします。ホストの `~/.config/opencode` や認証情報は読みません。
+- ツールの許可は、ほかのハーネスと同じく ACP の権限要求に `runtime.permissions` で答えます。
+- provider の認証情報がないと、OpenCode は無料の別モデルで始めようとします。agora はそれを検出して起動を失敗させます。
 
 ## Codex を ChatGPT プランで動かす
 

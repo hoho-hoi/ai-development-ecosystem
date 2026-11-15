@@ -7,7 +7,7 @@ from pathlib import Path
 from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_DIGEST, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo, write_profiles
 
 from agora.acp_client import decide_permission
-from agora.harness import prepare_harness_config, resolve_definition
+from agora.harness import harness_record_dir, prepare_harness_config, resolve_definition
 from agora.logins import LoginError, load_chatgpt_login, write_access_only
 from agora.modules import ModuleCache, load_local
 from agora.profiles import DEFAULT_STRIP, Permissions, load_profile, profile_from_dict
@@ -124,6 +124,45 @@ class HarnessConfigTests(unittest.TestCase):
             env = prepare_harness_config(p, Path(t), "/rt", None, [])
             self.assertEqual(env["CODEX_HOME"], "/rt/codex")
             self.assertIn("project_doc_max_bytes = 0", (Path(t) / "codex/config.toml").read_text())
+
+
+class OpencodeHarnessTests(unittest.TestCase):
+    def test_opencode_config_is_isolated_and_built_from_the_profile(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            skill = t / "src-skill" / "hello"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: hello\ndescription: x\n---\n")
+            p = profile_from_dict(minimal(runtime={"harness": "opencode", "adapter": "opencode acp",
+                                                   "model": "anthropic/claude-haiku-5-5"}))
+            env = prepare_harness_config(p, t / "out", "/rt", "You are the role.", [skill])
+            d = t / "out" / "opencode"
+            cfg = json.loads((d / "opencode.json").read_text())
+            self.assertEqual(cfg["model"], "anthropic/claude-haiku-5-5")
+            self.assertEqual(cfg["default_agent"], "agora")
+            agent = cfg["agents"]["agora"]
+            self.assertEqual((agent["mode"], agent["system"], agent["model"]),
+                             ("all", "You are the role.", "anthropic/claude-haiku-5-5"))
+            self.assertEqual(cfg["skills"], ["/rt/opencode/skills"])
+            self.assertEqual(cfg["share"], "disabled")
+            self.assertTrue((d / "skills" / "hello" / "SKILL.md").is_file())
+            # nothing from the host or the project is read; state stays in the session
+            self.assertEqual(env["OPENCODE_CONFIG"], "/rt/opencode/opencode.json")
+            self.assertEqual(env["OPENCODE_CONFIG_DIR"], "/rt/opencode")
+            for flag in ("OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE",
+                         "OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_AUTOUPDATE"):
+                self.assertEqual(env[flag], "true", flag)
+            for xdg in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+                self.assertTrue(env[xdg].startswith("/rt/opencode/"), xdg)
+            self.assertEqual(harness_record_dir(p), "opencode")
+
+    def test_opencode_without_instructions_has_no_system(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = profile_from_dict(minimal(runtime={"harness": "opencode", "adapter": "opencode acp",
+                                                   "model": "anthropic/claude-haiku-5-5"}))
+            prepare_harness_config(p, Path(t), "/rt", None, [])
+            cfg = json.loads((Path(t) / "opencode/opencode.json").read_text())
+            self.assertNotIn("system", cfg["agents"]["agora"])
 
 
 class ModuleTests(unittest.TestCase):

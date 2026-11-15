@@ -42,7 +42,7 @@ DIGEST_RE = re.compile(r"^([^\s@]+@)?sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # SHA-1 or SHA-256 object ids
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
-Harness = Literal["claude-code", "codex", "gemini", "custom"]
+Harness = Literal["claude-code", "codex", "opencode", "gemini", "custom"]
 
 
 

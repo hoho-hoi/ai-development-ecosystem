@@ -311,6 +311,20 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual(mod["plugin"]["name"], "mod")
         self.assertIn("io.github.hoho-hoi.agora/AGENTS.md", mod["files"])
 
+    async def test_profile_model_is_enforced(self):
+        # the harness offers the profile's model: agora switches to it
+        st = await self.b.tool("spawn", profile="pickmodel", wait=True)
+        self.assertEqual(st["state"], "idle", st)
+        _, r = await self.ask(st["id"], "MODEL")
+        self.assertEqual(json.loads(r["body"]), "test-model-1")
+        ev = (await self.b.tool("history", session=st["id"], kinds=["session.model"]))["events"][0]["payload"]
+        self.assertEqual((ev["reported"], ev["selected"]), ("other-model", "test-model-1"))
+        # it does not: the session fails instead of running on another model
+        st = await self.b.tool("spawn", profile="nomodel", wait=True)
+        self.assertEqual(st["state"], "failed", st)
+        ended = (await self.b.tool("history", session=st["id"], kinds=["session.end"]))["events"][0]["payload"]
+        self.assertIn("test-model-1", ended["reason"])
+
     async def test_no_broker_tools_means_no_bridge(self):
         st = await self.b.tool("spawn", profile="notools", wait=True)
         sent = await self.b.tool("send", to=st["id"], body="MCP")
@@ -452,7 +466,7 @@ class BridgeTests(BrokerCase):
                 res = await client.call_tool("list_profiles", {})
                 profiles = json.loads(res.content[0].text)["profiles"]
                 self.assertEqual(
-                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "noload", "notools"]
+                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "noload", "nomodel", "notools", "pickmodel"]
                 )
                 # annotations let harnesses call the messaging tools without asking
                 listed = {t.name: t.annotations for t in (await client.list_tools()).tools}

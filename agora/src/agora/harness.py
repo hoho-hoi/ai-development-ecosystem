@@ -29,6 +29,7 @@ def _copy_skills(skill_dirs: list[Path], dest: Path) -> list[str]:
 
 
 BRIDGE_SERVER = "agora"  # MCP server name of the broker bridge in every session
+OPENCODE_AGENT = "agora"  # the one agent of an OpenCode session
 
 
 def prepare_harness_config(
@@ -92,6 +93,44 @@ def prepare_harness_config(
         # Codex's own auto reviewer.
         env["NO_BROWSER"] = "1"
         env["INITIAL_AGENT_MODE"] = "read-only" if rt.permissions.mode == "deny" else "workspace-write"
+    elif rt.harness == "opencode":
+        # OpenCode V2 (`opencode acp`). The whole config comes from the profile:
+        # one agent built from the module's instructions, the module's skills,
+        # and private XDG dirs so no host or project config, auth or session
+        # store is read. Tool permissions are asked over ACP and answered by
+        # the broker from runtime.permissions, as for the other harnesses.
+        d = host_dir / "opencode"
+        (d / "skills").mkdir(parents=True)
+        _copy_skills(skill_dirs, d / "skills")
+        root = f"{runtime_dir}/opencode"
+        agent: dict[str, object] = {"mode": "all", "model": rt.model}
+        if instructions is not None:
+            agent["system"] = instructions
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": rt.model,
+            "default_agent": OPENCODE_AGENT,
+            "agents": {OPENCODE_AGENT: agent},
+            "skills": [f"{root}/skills"],
+            "share": "disabled",
+            "update": "disable",
+            "compaction": {"auto": False},
+        }
+        (d / "opencode.json").write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        env.update(
+            {
+                "OPENCODE_CONFIG": f"{root}/opencode.json",
+                "OPENCODE_CONFIG_DIR": root,
+                "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+                "OPENCODE_CONFIG_PROJECT_DISABLE": "true",
+                "OPENCODE_DISABLE_CLAUDE_CODE": "true",
+                "OPENCODE_DISABLE_AUTOUPDATE": "true",
+                "XDG_CONFIG_HOME": f"{root}/xdg/config",
+                "XDG_DATA_HOME": f"{root}/xdg/data",
+                "XDG_STATE_HOME": f"{root}/xdg/state",
+                "XDG_CACHE_HOME": f"{root}/xdg/cache",
+            }
+        )
     else:
         # gemini / custom: files are staged, wiring them in is up to the image.
         d = host_dir / rt.harness
@@ -131,4 +170,6 @@ CREDENTIAL_FILES = {"codex": ("auth.json",)}
 def harness_record_dir(profile: Profile) -> str:
     """Subdirectory (under the session's agora dir) that holds the harness's own
     session records, collected into history when the session ends."""
-    return {"claude-code": "claude", "codex": "codex"}.get(profile.runtime.harness, profile.runtime.harness)
+    return {"claude-code": "claude", "codex": "codex", "opencode": "opencode"}.get(
+        profile.runtime.harness, profile.runtime.harness
+    )

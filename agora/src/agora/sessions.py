@@ -630,7 +630,11 @@ class SessionManager:
                 await s.acp.load_session(load, s.handle.workspace_path, mcp_servers)
                 s.acp_session_id = load
             else:
-                s.acp_session_id = await s.acp.new_session(s.handle.workspace_path, mcp_servers)
+                s.acp_session_id, choice = await s.acp.new_session(
+                    s.handle.workspace_path, mcp_servers, model=profile.runtime.model
+                )
+                if choice:
+                    self.store.record("session.model", session_id=s.id, **choice)
             if s.state != "starting":
                 return
             self._set_state(s, "idle", acp_session_id=s.acp_session_id)
@@ -657,7 +661,8 @@ class SessionManager:
                 await s.acp.peer.request("session/close", {"sessionId": old}, timeout=10)
             except Exception as e:
                 self.store.record("session.error", session_id=s.id, stage="session_close", error=repr(e))
-        s.acp_session_id = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers)
+        assert s.profile is not None
+        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=s.profile.runtime.model)
         self.store.record("session.conversation", session_id=s.id, acp_session_id=s.acp_session_id, previous=old)
 
     async def _watch_process(self, s: Session) -> None:

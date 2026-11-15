@@ -72,9 +72,41 @@ class AcpClient:
         self.agent_info = result
         return result
 
-    async def new_session(self, cwd: str, mcp_servers: list[dict[str, Any]], timeout: float = 120) -> str:
+    async def new_session(
+        self, cwd: str, mcp_servers: list[dict[str, Any]], model: str | None = None, timeout: float = 120
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Open a conversation. With `model`, make sure it runs on that model:
+        returns (session id, {"reported", "selected"} when the agent reports a
+        model choice, else None). See ensure_model."""
         result = await self.peer.request("session/new", {"cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout)
-        return result["sessionId"]
+        sid = result["sessionId"]
+        choice = await self.ensure_model(sid, result, model) if model else None
+        return sid, choice
+
+    async def ensure_model(self, session_id: str, result: dict[str, Any], model: str) -> dict[str, Any] | None:
+        """Agents that report a model choice (an ACP config option of category
+        "model") may start on another model than the profile names, e.g. when
+        the provider is not configured. Switch to the profile's model when it
+        is offered; otherwise refuse, rather than run on a different model."""
+        options = [o for o in (result or {}).get("configOptions") or []
+                   if o.get("category") == "model" or o.get("id") == "model"]
+        if not options:
+            return None  # the agent does not say: nothing to check
+        opt = options[0]
+        current = opt.get("currentValue")
+        if current == model:
+            return {"reported": current, "selected": model}
+        offered = [o.get("value") for o in opt.get("options") or []]
+        if model not in offered:
+            raise RpcError(
+                -32000,
+                f"the harness does not offer model {model!r} (it started on {current!r}; offered: "
+                f"{', '.join(map(str, offered[:20]))}). Check the model name and the provider credentials.",
+            )
+        await self.peer.request(
+            "session/set_config_option", {"sessionId": session_id, "configId": opt.get("id"), "value": model}
+        )
+        return {"reported": current, "selected": model}
 
     async def load_session(
         self, session_id: str, cwd: str, mcp_servers: list[dict[str, Any]], timeout: float = 300

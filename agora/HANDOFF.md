@@ -37,6 +37,15 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.7.1（2026-11-15）：OpenCode のアダプタ、モデルの確認、実機での起動
+
+- **実機**：クラウド環境で `dockerd` を起動し、`images/claude-code`（claude-agent-acp 0.75.1）と `images/opencode`（@opencode/cli 2.3.0）をビルドした。どちらも agora から起動して ACP の `session/new` まで通った（モデルの呼び出しは認証待ち）。この環境のプロキシは https の CONNECT しか通さないので、ビルドには apt を https にした環境専用のベースイメージを使った（リポジトリには入れていない）。
+- **OpenCode のアダプタ**：`runtime.harness: opencode`。ユーザーの方針「モジュールは特定のハーネスに依存させず、OpenCode 依存のロジックは agora のアダプタに置く」による。設定はプロファイルとモジュールから作り、ホストとプロジェクトの設定は読まない（README「OpenCode で動かす」）。
+- **モデルの確認**：OpenCode は provider の認証がないと無料の別モデルで黙って始めた。再現性のため、ACP がモデルの選択肢を示すときは、起動時に確かめて切り替え、選べなければ失敗させる。Claude Code のアダプタはプロファイルのモデルを現在値として返すことを確かめた。
+- **list_profiles がモジュールを取得する**：リポジトリに固定したモジュールが初回起動まで「not fetched yet」と表示され、説明で選べなかったため。
+- 見本のモジュール `examples/modules/caller` と、romaji-converter・akinator の移行（各リポジトリの `task/agora` ブランチ）。
+- テスト 89 件が通る。
+
 ## v0.7.0（2026-11-14）：名前を agora に、モジュールを Agent Plugins に
 
 ユーザーとの合意（要件図：https://claude.ai/artifact/59vGrW6ZaeMtUU7M8KF58o）：
