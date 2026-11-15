@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_profiles": ({"place"}, set()),
-    "spawn": ({"profile", "task", "ref", "name", "wait", "wait_timeout", "place"}, {"profile"}),
+    "spawn": ({"profile", "task", "ref", "module_ref", "name", "wait", "wait_timeout", "place"}, {"profile"}),
     "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
     "send": ({"to", "body", "thread_id", "reply_to"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
@@ -163,6 +163,7 @@ class Broker:
                 return await m.spawn(
                     caller, args["profile"], task=args.get("task"), ref=args.get("ref"), name=args.get("name"),
                     wait=bool(args.get("wait", True)), wait_timeout=wait, place=place,
+                    module_ref=args.get("module_ref"),
                 )
             return await m.forward(caller, place, tool, args, timeout=wait + 120)
         if tool == "whoami":
@@ -184,6 +185,7 @@ class Broker:
                 name=args.get("name"),
                 wait=bool(args.get("wait", True)),
                 wait_timeout=float(args.get("wait_timeout", 600)),
+                module_ref=args.get("module_ref"),
             )
         if tool == "clone":
             target = caller.id if args["session"] == "self" else args["session"]

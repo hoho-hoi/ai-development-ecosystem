@@ -88,6 +88,7 @@ TOOLS: list[dict[str, Any]] = [
                 "profile": {**S, "description": "Profile id"},
                 "task": {**S, "description": "First message to the new session"},
                 "ref": {**S, "description": "Full commit SHA overriding the profile's workspace.ref"},
+                "module_ref": {**S, "description": "Full commit SHA of the profile's module repository to run instead of the pinned one (e.g. a candidate version)"},
                 "name": {**S, "description": "Session name (defaults to the profile id)"},
                 "wait": {"type": "boolean", "description": "Wait until the session is ready (default true)"},
                 "wait_timeout": {"type": "number", "description": "Seconds to wait (default 600)"},

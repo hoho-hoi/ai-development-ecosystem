@@ -290,6 +290,17 @@ class Profile(_Model):
             "module": self.module.model_dump(exclude_none=True) if self.module else None,
         }
 
+    def with_module_ref(self, ref: str, cache: Any = None) -> "Profile":
+        """The same profile with its repository module pinned to another
+        commit (e.g. a candidate version under evaluation)."""
+        if not (self.module and self.module.repo):
+            raise ValueError("module_ref needs a profile whose module is pinned in a repository")
+        if not COMMIT_RE.match(ref):
+            raise ValueError("module_ref must be a full commit SHA")
+        data = self.model_dump(by_alias=True)
+        data["module"]["ref"] = ref
+        return profile_from_dict(data, source=self._source, cache=cache)
+
     def resolved_dump(self) -> dict[str, Any]:
         """The full profile as it will run, for the history record."""
         data = self.model_dump(by_alias=True)

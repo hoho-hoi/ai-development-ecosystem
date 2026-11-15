@@ -289,7 +289,7 @@ codex mcp add agora -- agora mcp --harness codex
 | --- | --- |
 | `send` | 宛先（`id@場所`、または同じ場所の id か名前）の受信箱に入れて、すぐ `message_id` を返す。`reply_to` があれば宛先は省ける |
 | `receive` | 自分宛ての未読を取り出す。`from`・`reply_to` で絞り込み、`wait` 秒（最大 600）まで待てる。`from` の相手が黙れば待たずに返る |
-| `spawn` | プロファイルからセッションを起動（`place` で別の場所に）。`task` を渡すと最初のメッセージになり、結果の `task_message_id` で返事を `receive` できる |
+| `spawn` | プロファイルからセッションを起動（`place` で別の場所に）。`task` を渡すと最初のメッセージになり、結果の `task_message_id` で返事を `receive` できる。`module_ref` にコミット SHA を渡すと、そのプロファイルのモジュールを別の版（改善の候補など）にして起動する（リポジトリに固定したモジュールのみ。`session.spawn` に記録） |
 | `clone` | セッション（`"self"` なら自分）の複製を起動。ワークスペースと会話をその時点のまま引き継ぐ |
 | `list_profiles` | プロファイル一覧（Agent Card 相当）と、ほかに知っている場所。`place` で別の場所に聞く |
 | `list_sessions` / `status` | 一覧と状態（未読の数、直近のターンで書いた文章、経過時間、使用量）。`place`・`id@場所` で別の場所 |

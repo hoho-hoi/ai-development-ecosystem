@@ -440,10 +440,12 @@ class SessionManager:
         wait: bool = True,
         wait_timeout: float = 600,
         place: str | None = None,
+        module_ref: str | None = None,
     ) -> dict[str, Any]:
         if place and place != self.place:
             # Born elsewhere; the task is then an ordinary signed message from the caller.
-            args = {"profile": profile_id, "ref": ref, "name": name, "wait": wait, "wait_timeout": wait_timeout}
+            args = {"profile": profile_id, "ref": ref, "name": name, "wait": wait, "wait_timeout": wait_timeout,
+                    "module_ref": module_ref}
             st = await self.forward(caller, place, "spawn", {k: v for k, v in args.items() if v is not None},
                                     timeout=wait_timeout + 60)
             task_message_id = None
@@ -454,6 +456,11 @@ class SessionManager:
             profile = self.profiles.get(profile_id)
         except KeyError as e:
             raise NotFound(str(e)) from None
+        if module_ref:
+            try:
+                profile = profile.with_module_ref(module_ref, self.profiles.cache)
+            except ValueError as e:
+                raise BrokerError(str(e)) from None
         s = await self._born(caller, profile, name, {"ref": ref or profile.workspace.ref})
         self.store.record(
             "session.spawn",
@@ -463,6 +470,7 @@ class SessionManager:
             fingerprint=profile.fingerprint,
             task=task,
             ref_override=ref,
+            module_ref_override=module_ref,
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )

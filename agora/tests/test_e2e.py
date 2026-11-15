@@ -16,7 +16,9 @@ from pathlib import Path
 from helpers import (
     BRIDGE,
     FAKE_REFRESH_TOKEN,
+    NS,
     RunningBroker,
+    git,
     make_codex_login,
     make_repo,
 )
@@ -346,6 +348,26 @@ class ModuleProfileTests(BrokerCase):
         mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
         self.assertEqual(mod["source"]["path"], "peer")
         self.assertEqual(len(mod["source"]["ref"]), 40)
+
+    async def test_spawn_with_a_candidate_module_commit(self):
+        # a candidate version of the peer module, committed after the pinned one
+        mrepo = self.tmp / "module-repo"
+        (mrepo / "peer" / NS / "AGENTS.md").write_text("You are the candidate peer.\n")
+        git(mrepo, "commit", "-q", "-am", "candidate")
+        candidate = git(mrepo, "rev-parse", "HEAD")
+        st = await self.b.tool("spawn", profile="modrepo", module_ref=candidate, wait=True)
+        self.assertEqual(st["state"], "idle", st)
+        _, r = await self.ask(st["id"], "INSTRUCTIONS")
+        self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the candidate peer.\n")
+        spawn = (await self.b.tool("history", session=st["id"], kinds=["session.spawn"]))["events"][0]["payload"]
+        self.assertEqual((spawn["module_ref_override"], spawn["profile"]["module"]["ref"]), (candidate, candidate))
+        mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
+        self.assertEqual(mod["source"]["ref"], candidate)
+        # only a full commit, and only for a profile whose module is pinned in a repository
+        code, body = await self.b.post("/api/tools/spawn", {"profile": "modrepo", "module_ref": "main"})
+        self.assertEqual(code, 400, body)
+        code, body = await self.b.post("/api/tools/spawn", {"profile": "modlocal", "module_ref": candidate})
+        self.assertEqual(code, 400, body)
 
     async def test_receive_wait_is_bounded_and_filters(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
