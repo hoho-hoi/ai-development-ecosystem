@@ -191,6 +191,8 @@ my-module/
 
 ## プロファイル
 
+見本のモジュール：[examples/modules/caller](examples/modules/caller)（依頼に合う登録済みのプロファイルを選んで起動し、返事を取り次ぐ。セッションから別のセッションを起動できるかの確認用。プロファイルは [caller.yaml](profiles/examples/caller.yaml)）
+
 例：[akinator.yaml](profiles/examples/akinator.yaml)、[akinator-answerer.yaml](profiles/examples/akinator-answerer.yaml)、[romaji-converter.yaml](profiles/examples/romaji-converter.yaml)（モジュールを使う例）、[reviewer.yaml](profiles/examples/reviewer.yaml)、[implementer.yaml](profiles/examples/implementer.yaml)（指示をプロファイルに直接書く例）
 
 | フィールド | 内容 |
