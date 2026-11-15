@@ -14,7 +14,7 @@
 # commit; a local one is for development. The module's id is its plugin.json name.
 modules:
   - repo: https://github.com/ysgrProgramming/romaji-converter.git
-    ref: 415852ed829e239ecc6d492de54eac877cb04580
+    ref: 049b3e436c5282d8c8ceff97c05e41f4a792fb20
     path: execution
   - local: examples/modules/caller
 

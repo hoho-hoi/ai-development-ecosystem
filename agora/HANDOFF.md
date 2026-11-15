@@ -49,6 +49,7 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **権限**：「権限はフルでいい。人間に承認をもらうのではなく自動で動いてほしい。やってほしくないことは、そもそもツールや MCP から外す」（ユーザー）。`permissions` を廃止し、常に許可。ハーネス組み込みのツールは `builtinTools: false` で一括して止められる（Q4 は未回答のため、方針に合う一括切り替えにした）。
 - **場所の設定**（agora.yaml）に残したのは、その場所の事情だけ：`modules`（登録するモジュールと版）、`network`（プロキシ）、`harnesses`（既存イメージや ACP コマンドの差し替え）、`docker.build_args`・`build_network`。作業するリポジトリは `spawn` の `workspace` 引数。
 - Gemini と custom のハーネスはなくした（使われていなかった）。テスト 88 件が通る。
+- **実機（v0.8）**：クラウド環境で、`agora.yaml` に5つのモジュールをコミットで登録。agora が `agora/opencode:2.3.0` を自動でビルドし、romaji-converter（DeepSeek V4.1 Flash Free）が変換を `send` で返した。caller が `list_modules` → `spawn`（romaji-converter）→ `receive` → `send` → `terminate` と動き、操作者に結果が届いた。module-authoring と improvement-designer は「`AGORA_CLAUDE_OAUTH_TOKEN` がこの場所にない」と明示して起動を断った（期待どおり）。
 
 ## 実モデルでの確認（2026-11-15、v0.7.1 + module_ref）
 

@@ -213,7 +213,7 @@ my-module/
 ```yaml
 modules:
   - repo: https://github.com/ysgrProgramming/romaji-converter.git
-    ref: 415852ed829e239ecc6d492de54eac877cb04580   # コミット SHA（ブランチ名は拒否）
+    ref: 049b3e436c5282d8c8ceff97c05e41f4a792fb20   # コミット SHA（ブランチ名は拒否）
     path: execution                                  # リポジトリ内のディレクトリ（既定はルート）
   - local: examples/modules/caller                   # 開発用。中身のハッシュが fingerprint に入る
 ```
