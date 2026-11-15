@@ -375,6 +375,21 @@ class ProfileRegistry:
             profiles[p.id] = p
         return profiles, errors
 
+    def prefetch(self) -> dict[str, str]:
+        """Fetch the pinned modules of all profiles that are not cached yet,
+        so their names and descriptions are known. Returns fetch errors by
+        profile id (the profile stays listed with a placeholder description)."""
+        errors: dict[str, str] = {}
+        if self.cache is None:
+            return errors
+        for p in self._load_all()[0].values():
+            if p.module and p.module.repo and not self.cache.cached(p.module.repo, p.module.ref):
+                try:
+                    self.cache.fetch(p.module.repo, p.module.ref)
+                except Exception as e:
+                    errors[p.id] = f"module fetch failed: {e}"
+        return errors
+
     def list(self) -> list[Profile]:
         return list(self._load_all()[0].values())
 

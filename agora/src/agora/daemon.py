@@ -15,6 +15,7 @@ caller has unread messages: JSON {"count": n, "from": [{session, name, count}]}.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import hmac
@@ -167,11 +168,12 @@ class Broker:
         if tool == "whoami":
             return {**m.summary(caller), "public_key": caller.key.public_hex if caller.key else None}
         if tool == "list_profiles":
+            fetch_errors = await asyncio.to_thread(self.profiles.prefetch)
             return {
                 "place": m.place,
                 "places": sorted(self.federation.peers),  # where else profiles can be listed and spawned
                 "profiles": [p.agent_card() for p in self.profiles.list()],
-                "errors": self.profiles.errors(),
+                "errors": {**self.profiles.errors(), **fetch_errors},
             }
         if tool == "spawn":
             return await m.spawn(

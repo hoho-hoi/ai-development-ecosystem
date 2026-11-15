@@ -321,9 +321,10 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual([m["name"] for m in servers], ["tool"])
 
     async def test_repo_module_pinned_by_commit(self):
+        # list_profiles fetches pinned modules, so callers can choose by description
         profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
         self.assertEqual(profiles["modlocal"]["name"], "mod")
-        self.assertIn("not fetched yet", profiles["modrepo"]["description"])
+        self.assertEqual((profiles["modrepo"]["name"], profiles["modrepo"]["description"]), ("peer", "peer module"))
         st = await self.b.tool("spawn", profile="modrepo", wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
@@ -331,8 +332,6 @@ class ModuleProfileTests(BrokerCase):
         mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
         self.assertEqual(mod["source"]["path"], "peer")
         self.assertEqual(len(mod["source"]["ref"]), 40)
-        profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
-        self.assertEqual(profiles["modrepo"]["name"], "peer")  # cached now
 
     async def test_receive_wait_is_bounded_and_filters(self):
         st = await self.b.tool("spawn", profile="echo", wait=True)
