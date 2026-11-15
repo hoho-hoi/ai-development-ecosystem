@@ -53,7 +53,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
 
     # --- messages between places -------------------------------------------------
     async def test_spawn_elsewhere_and_talk(self):
-        st = await self.pc1.tool("spawn", profile="echo", task="hello from pc1", place="pc2")
+        st = await self.pc1.tool("spawn", module="echo", task="hello from pc1", place="pc2")
         self.assertEqual(st["state"], "idle", st)
         self.assertEqual(st["address"], f"{st['id']}@pc2")
         self.assertEqual(st["parent"], "operator@pc1")
@@ -80,7 +80,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.reply(self.pc1, sent["message_id"], st["address"]))["body"], "echo: reply without to")
 
     async def test_a_lost_answer_is_retried_by_the_place_not_the_sender(self):
-        st = await self.pc1.tool("spawn", profile="echo", place="pc2")
+        st = await self.pc1.tool("spawn", module="echo", place="pc2")
         fed = self.pc1.broker.federation
         real, delivered = fed.post, []
 
@@ -111,7 +111,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         self.assertIn("3 attempts", body["error"])
 
     async def test_receive_from_someone_elsewhere_sees_them_go_quiet(self):
-        st = await self.pc1.tool("spawn", profile="echo", place="pc2")
+        st = await self.pc1.tool("spawn", module="echo", place="pc2")
         sent = await self.pc1.tool("send", to=st["address"], body="FINAL_ONLY")
         t0 = time.monotonic()
         r = await self.pc1.tool("receive", **{"from": st["address"], "wait": 30})
@@ -125,8 +125,8 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sent["message_id"])
 
     async def test_residents_of_two_places_talk_through_their_bridges(self):
-        a = await self.pc1.tool("spawn", profile="echo")
-        b = await self.pc2.tool("spawn", profile="echo")
+        a = await self.pc1.tool("spawn", module="echo")
+        b = await self.pc2.tool("spawn", module="echo")
         cmd = json.dumps({"to": b["address"], "body": "hi b, this is a"})
         _, r = await self.ask(self.pc1, a["id"], f"BRIDGE send {cmd}")
         result = json.loads(json.loads(r["body"])["content"][0]["text"])
@@ -144,12 +144,12 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
 
     # --- tools that reach another place ------------------------------------------
     async def test_tools_reach_another_place(self):
-        profiles = await self.pc1.tool("list_profiles", place="pc2")
-        self.assertEqual(profiles["place"], "pc2")
-        self.assertIn("echo", [p["id"] for p in profiles["profiles"]])
-        self.assertEqual((await self.pc1.tool("list_profiles"))["places"], ["pc2"])
+        mods = await self.pc1.tool("list_modules", place="pc2")
+        self.assertEqual(mods["place"], "pc2")
+        self.assertIn("echo", [m["id"] for m in mods["modules"]])
+        self.assertEqual((await self.pc1.tool("list_modules"))["places"], ["pc2"])
 
-        st = await self.pc1.tool("spawn", profile="echo", place="pc2")
+        st = await self.pc1.tool("spawn", module="echo", place="pc2")
         listed = await self.pc1.tool("list_sessions", place="pc2")
         self.assertEqual([s["address"] for s in listed["sessions"]], [st["address"]])
         self.assertEqual((await self.pc1.tool("status", session=st["address"]))["state"], "idle")
@@ -166,13 +166,13 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         token = me["token"]
         a = await self.pc1.tool("whoami", token)
         # echo is spawnableBy external, at another place too
-        child = await self.pc1.tool("spawn", token, profile="echo", place="pc2", task="from a")
+        child = await self.pc1.tool("spawn", token, module="echo", place="pc2", task="from a")
         self.assertEqual(child["parent"], a["address"])
         self.assertEqual(child["depth"], 1)
         got = await self.reply(self.pc1, child["task_message_id"], child["address"], token)
         self.assertEqual(got["body"], "echo: from a")
         # but not locked, whose spawnableBy is [reviewer]
-        code, body = await self.pc1.post("/api/tools/spawn", {"profile": "locked", "place": "pc2"}, token)
+        code, body = await self.pc1.post("/api/tools/spawn", {"module": "locked", "place": "pc2"}, token)
         self.assertEqual(code, 403, body)
         # only an operator, the parent or the person itself may terminate
         _, other = await self.pc1.post("/api/register", {"name": "other"})
@@ -185,7 +185,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         code, body = await self.pc1.post("/api/tools/send", {"to": "someone@pc3", "body": "x"})
         self.assertEqual(code, 404, body)
         self.assertIn("unknown place", body["error"])
-        code, body = await self.pc1.post("/api/tools/spawn", {"profile": "echo", "place": "pc3"})
+        code, body = await self.pc1.post("/api/tools/spawn", {"module": "echo", "place": "pc3"})
         self.assertEqual(code, 404, body)
 
     # --- what a place accepts from another ---------------------------------------
@@ -295,7 +295,7 @@ class Clones(unittest.IsolatedAsyncioTestCase):
         return res["messages"][0]["body"]
 
     async def test_clone_keeps_memories_and_workspace_then_diverges(self):
-        src = await self.b.tool("spawn", profile="echo", name="thinker")
+        src = await self.b.tool("spawn", module="echo", name="thinker")
         await self.ask(src["id"], "REMEMBER apple")
         await self.ask(src["id"], "WRITE note.txt written before the clone")
 
@@ -325,10 +325,10 @@ class Clones(unittest.IsolatedAsyncioTestCase):
         clone_ev = (await self.b.tool("history", session=twin["id"], kinds=["session.clone"]))["events"][0]
         self.assertEqual(clone_ev["payload"]["source"], src["address"])
         # the clone got the source's records but its own config (instructions, settings)
-        self.assertIn("You are the echo profile.", await self.ask(twin["id"], "INSTRUCTIONS"))
+        self.assertIn("You are the echo module.", await self.ask(twin["id"], "INSTRUCTIONS"))
 
     async def test_a_person_can_clone_itself_mid_turn(self):
-        src = await self.b.tool("spawn", profile="echo")
+        src = await self.b.tool("spawn", module="echo")
         await self.ask(src["id"], "REMEMBER who I am")
         res = json.loads(await self.ask(src["id"], 'BRIDGE clone {"session": "self", "name": "me-again"}'))
         twin = json.loads(res["content"][0]["text"])
@@ -336,7 +336,7 @@ class Clones(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(await self.ask(twin["id"], "MEMORY"))["memory"], ["who I am"])
 
     async def test_clone_needs_a_harness_that_can_resume(self):
-        src = await self.b.tool("spawn", profile="noload")
+        src = await self.b.tool("spawn", module="noload")
         twin = await self.b.tool("clone", session=src["id"])
         self.assertEqual(twin["state"], "failed")
         self.assertIn("loadSession", twin["end_reason"])
@@ -358,8 +358,8 @@ class OpenHistory(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_anyone_reads_anyone_and_can_follow_live(self):
-        a = await self.b.tool("spawn", profile="echo", name="a")
-        b = await self.b.tool("spawn", profile="echo", name="b")
+        a = await self.b.tool("spawn", module="echo", name="a")
+        b = await self.b.tool("spawn", module="echo", name="b")
         # a reads b's thoughts although they never met and a did not start b
         sent = await self.b.tool("send", to=a["id"], body=f'BRIDGE history {json.dumps({"session": b["id"]})}')
         res = await self.b.tool("receive", **{"reply_to": sent["message_id"], "wait": 20})

@@ -37,7 +37,7 @@ class DockerTests(BrokerCase):
         await self.b.start()
 
     async def test_session_in_container(self):
-        st = await self.b.tool("spawn", profile="echo", task="hello container", wait=True, wait_timeout=120)
+        st = await self.b.tool("spawn", module="echo", task="hello container", wait=True, wait_timeout=120)
         self.assertEqual(st["state"], "idle", st)
         sid = st["id"]
         name = f"agora-{sid}"
@@ -76,7 +76,7 @@ class DockerTests(BrokerCase):
         self.assertTrue(transcript.is_file())
 
     async def test_clone_in_container(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True, wait_timeout=120)
+        st = await self.b.tool("spawn", module="echo", wait=True, wait_timeout=120)
         _, r = await self.ask(st["id"], "REMEMBER the container", wait=60)
         await self.ask(st["id"], "WRITE note.txt made inside", wait=60)
         twin = await self.b.tool("clone", session=st["id"], wait=True, wait_timeout=120)
@@ -93,7 +93,7 @@ class DockerTests(BrokerCase):
             await self.b.tool("terminate", session=sid)
 
     async def test_codex_plan_login_in_container(self):
-        st = await self.b.tool("spawn", profile="codexplan", wait=True, wait_timeout=120)
+        st = await self.b.tool("spawn", module="codexplan", wait=True, wait_timeout=120)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "CODEX_AUTH", wait=60)
         seen = json.loads(r["body"])

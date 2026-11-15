@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 AUTH_FILE = "auth.json"
-# Margin on top of a profile's maxRuntimeMinutes when checking token expiry.
+# Margin on top of a module's maxRuntimeMinutes when checking token expiry.
 EXPIRY_MARGIN_SECONDS = 30 * 60
 
 

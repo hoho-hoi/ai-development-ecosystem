@@ -21,7 +21,6 @@ from agora.daemon import Broker, make_sockets  # noqa: E402
 
 FAKE_AGENT = ROOT / "tests" / "fake_acp_agent.py"
 BRIDGE = ROOT / "src" / "agora" / "bridge.py"
-FAKE_DIGEST = "sha256:" + "a" * 64
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -68,6 +67,10 @@ MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 NS = "io.github.hoho-hoi.agora"
 
 
+TEST_RUNTIME = {"harness": "claude-code", "version": "test", "model": "test-model-1"}
+TEST_LIMITS = {"maxRuntimeMinutes": 5, "maxSpawnDepth": 1, "maxConcurrent": 3}
+
+
 def plugin_json(name: str, description: str = "", **extra) -> str:
     return json.dumps({"$schema": PLUGIN_SCHEMA, "name": name, "description": description, **extra})
 
@@ -78,14 +81,17 @@ def make_module_repo(root: Path) -> tuple[Path, str]:
     outside both. Returns (repo, commit)."""
     repo = root / "module-repo"
     files = {
-        "agent/plugin.json": plugin_json("mod", "a module for tests", version="1.2.0"),
+        "agent/plugin.json": plugin_json("mod", "a module for tests", version="1.2.0", extensions={NS: {
+            "runtimes": [TEST_RUNTIME], "sessionMode": "per_message", "tools": ["send"], "builtinTools": False,
+            "limits": TEST_LIMITS}}),
         f"agent/{NS}/AGENTS.md": "You are the test module.\n",
         "agent/skills/mod-skill/SKILL.md": "---\nname: mod-skill\ndescription: test\n---\n",
         "agent/mcp.json": json.dumps({"$schema": MCP_SCHEMA, "mcpServers": {
             "tool": {"type": "stdio", "command": "./bin/tool", "args": ["--root", "${PLUGIN_ROOT}"],
                      "env": {"MODE": "x"}}}}),
         "agent/bin/tool": "#!/bin/sh\n",
-        "peer/plugin.json": plugin_json("peer", "peer module"),
+        "peer/plugin.json": plugin_json("peer", "peer module", extensions={NS: {
+            "runtimes": [TEST_RUNTIME], "tools": ["send", "receive"], "limits": TEST_LIMITS}}),
         f"peer/{NS}/AGENTS.md": "You are the peer.\n",
         "docs/purpose.md": "never given to the agent\n",
     }
@@ -132,83 +138,55 @@ def make_codex_login(login_dir: Path, expires_in: float = 10 * 86400) -> dict:
     return auth
 
 
-def write_profiles(pdir: Path, repo: Path, commit: str, image: str = FAKE_DIGEST, adapter: list[str] | None = None,
-                   module_repo: tuple[Path, str] | None = None) -> None:
-    pdir.mkdir(parents=True, exist_ok=True)
-    (pdir / "echo-instructions.md").write_text("You are the echo profile.\n")
-    skill = pdir / "skills" / "echo-skill"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: echo-skill\ndescription: test\n---\n")
-    adapter = adapter or [sys.executable, str(FAKE_AGENT)]
-    base = {
-        "version": "1.0.0",
-        "description": "test profile",
-        "runtime": {
-            "harness": "claude-code",
-            "adapter": adapter,
-            "model": "test-model-1",
-            "image": image,
-            "instructions": "./echo-instructions.md",
-            "bundledSkills": ["./skills/echo-skill"],
-            "secrets": ["AGORA_TEST_SECRET"],
-            "permissions": {"mode": "allow", "allowKinds": ["read", "edit"]},
-        },
-        "workspace": {"repo": str(repo), "ref": commit},
-        "limits": {"maxRuntimeMinutes": 5, "maxSpawnDepth": 1, "maxConcurrent": 3},
-    }
-    profiles = {
-        "echo": {**base, "id": "echo", "name": "Echo", "spawnableBy": ["external", "echo"]},
-        "locked": {**base, "id": "locked", "name": "Locked", "spawnableBy": ["reviewer"]},
-    }
-    if module_repo:
-        mrepo, mcommit = module_repo
-        rt = {k: v for k, v in base["runtime"].items() if k not in ("instructions", "bundledSkills")}
-        profiles["modlocal"] = {
-            "id": "modlocal", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "sessionMode": "per_message", "brokerTools": ["send"],
-                        "permissions": {"mode": "deny", "deniedTools": ["Bash", "WebSearch"]}},
-            "limits": base["limits"],
-        }
-        profiles["modrepo"] = {
-            "id": "modrepo", "version": "1.0.0",
-            "module": {"repo": str(mrepo), "ref": mcommit, "path": "peer"},
-            "runtime": {**rt, "brokerTools": ["send", "receive"]},
-            "limits": base["limits"],
-        }
-        profiles["codexplan"] = {
-            "id": "codexplan", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "harness": "codex", "login": "chatgpt", "secrets": [],
-                        "permissions": {"mode": "deny"}},
-            "limits": base["limits"],
-        }
-        profiles["noload"] = {  # a harness that cannot resume a conversation
-            "id": "noload", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "env": {"FAKE_NO_LOAD": "1"}},
-            "limits": base["limits"],
-        }
-        profiles["pickmodel"] = {  # the harness starts on another model but offers the profile's
-            "id": "pickmodel", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "env": {"FAKE_MODELS": "other-model,test-model-1", "FAKE_CURRENT": "other-model"}},
-            "limits": base["limits"],
-        }
-        profiles["nomodel"] = {  # the harness does not offer the profile's model at all
-            "id": "nomodel", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "env": {"FAKE_MODELS": "other-model", "FAKE_CURRENT": "other-model"}},
-            "limits": base["limits"],
-        }
-        profiles["notools"] = {
-            "id": "notools", "version": "1.0.0",
-            "module": {"local": str(mrepo), "path": "agent"},
-            "runtime": {**rt, "brokerTools": False},
-            "limits": base["limits"],
-        }
-    for pid, data in profiles.items():
-        (pdir / f"{pid}.yaml").write_text(json.dumps(data))  # JSON is valid YAML
+def _module(d: Path, name: str, ext: dict, instructions: str | None = None, skill: bool = False,
+            copy_from: Path | None = None) -> Path:
+    import shutil
+
+    if copy_from:
+        shutil.copytree(copy_from, d)
+    else:
+        d.mkdir(parents=True)
+    (d / "plugin.json").write_text(plugin_json(name, f"test module {name}", version="1.0.0", extensions={NS: ext}))
+    if instructions is not None:
+        (d / NS).mkdir(exist_ok=True)
+        (d / NS / "AGENTS.md").write_text(instructions)
+    if skill:
+        sk = d / "skills" / "echo-skill"
+        sk.mkdir(parents=True)
+        (sk / "SKILL.md").write_text("---\nname: echo-skill\ndescription: test\n---\n")
+    return d
+
+
+def write_modules(home: Path, module_repo: tuple[Path, str]) -> list[dict]:
+    """Local test modules (their plugin.json says how they run), plus the
+    module repository's two modules. Returns agora.yaml's `modules` list."""
+    mdir = home / "modules"
+    mrepo, mcommit = module_repo
+    echo_rt = {**TEST_RUNTIME, "env": {"AGORA_TEST_SECRET": "${AGORA_TEST_SECRET}"}}
+    base = {"runtimes": [echo_rt], "limits": TEST_LIMITS}
+    agent = mrepo / "agent"
+    plain = {k: v for k, v in TEST_RUNTIME.items()}
+    mods = [
+        _module(mdir / "echo", "echo", {**base, "spawnableBy": ["external", "echo"]},
+                "You are the echo module.\n", skill=True),
+        _module(mdir / "locked", "locked", {**base, "spawnableBy": ["reviewer"]}, "Locked.\n"),
+        _module(mdir / "codexplan", "codexplan", {"runtimes": [{**plain, "harness": "codex", "login": "chatgpt"}],
+                "builtinTools": False, "limits": TEST_LIMITS}, copy_from=agent),
+        # a harness that cannot resume a conversation
+        _module(mdir / "noload", "noload", {"runtimes": [{**plain, "env": {"FAKE_NO_LOAD": "1"}}], "limits": TEST_LIMITS},
+                copy_from=agent),
+        # the harness starts on another model but offers the module's
+        _module(mdir / "pickmodel", "pickmodel", {"runtimes": [{**plain, "env": {
+            "FAKE_MODELS": "other-model,test-model-1", "FAKE_CURRENT": "other-model"}}], "limits": TEST_LIMITS},
+                copy_from=agent),
+        # the harness does not offer the module's model at all
+        _module(mdir / "nomodel", "nomodel", {"runtimes": [{**plain, "env": {
+            "FAKE_MODELS": "other-model", "FAKE_CURRENT": "other-model"}}], "limits": TEST_LIMITS}, copy_from=agent),
+        _module(mdir / "notools", "notools", {"runtimes": [plain], "tools": False, "limits": TEST_LIMITS},
+                copy_from=agent),
+    ]
+    return ([{"local": str(m)} for m in mods]
+            + [{"local": str(mrepo), "path": "agent"}, {"repo": str(mrepo), "ref": mcommit, "path": "peer"}])
 
 
 class RunningBroker:
@@ -220,16 +198,17 @@ class RunningBroker:
             make_module_repo(tmp)
         module_repo = (tmp / "module-repo", git(tmp / "module-repo", "rev-parse", "HEAD"))
         home = tmp / place
-        if docker_image:
-            write_profiles(home / "profiles", repo, commit, image=docker_image,
-                           adapter=["python3", "/opt/agora/fake_acp_agent.py"], module_repo=module_repo)
-        else:
-            write_profiles(home / "profiles", repo, commit, module_repo=module_repo)
+        modules = write_modules(home, module_repo)
+        adapter = ["python3", "/opt/agora/fake_acp_agent.py"] if docker_image else [sys.executable, str(FAKE_AGENT)]
+        fake = {"adapter": adapter, **({"image": docker_image} if docker_image else {})}
         self.place = place
+        # Fixture convenience: echo and locked work in this repository unless told otherwise.
+        self.default_workspace = {"repo": str(repo), "ref": commit}
         self.cfg = BrokerConfig(
             place=place,
             state_dir=home / "state",
-            profiles_dir=home / "profiles",
+            modules=modules,
+            harnesses={"claude-code": fake, "codex": fake},
             listen_port=0,
             runner="docker" if docker_image else "local",
             allow_local_runner=not docker_image,
@@ -291,6 +270,9 @@ class RunningBroker:
         return await asyncio.to_thread(self._post_sync, path, body, token or self.broker.key, timeout)
 
     async def tool(self, tool_name: str, token: str | None = None, /, **args: Any) -> Any:
+        if tool_name == "spawn" and args.get("module") in ("echo", "locked") and "workspace" not in args \
+                and not args.get("place"):
+            args["workspace"] = self.default_workspace
         code, body = await self.post(f"/api/tools/{tool_name}", args, token, timeout=args.get("wait", 0) + 120)
         if code != 200:
             raise AssertionError(f"{tool_name} -> {code}: {body}")

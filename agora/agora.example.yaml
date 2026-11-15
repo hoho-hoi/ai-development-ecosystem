@@ -1,10 +1,22 @@
 # agora configuration for one place (one machine).
 # Copy to agora.yaml and run: agora daemon --config agora.yaml
 # Relative paths are relative to this file.
+#
+# How a module's sessions run (harness, model, tools, limits, credentials)
+# is in the module's own plugin.json. This file holds only what belongs to
+# the machine.
 
 # This place's name: the part after @ in its residents' addresses (id@place).
 # Default: the hostname, lowercased.
 # place: pc1
+
+# The modules that can be started here. A repository module is pinned to a
+# commit; a local one is for development. The module's id is its plugin.json name.
+modules:
+  - repo: https://github.com/ysgrProgramming/romaji-converter.git
+    ref: 415852ed829e239ecc6d492de54eac877cb04580
+    path: execution
+  - local: examples/modules/caller
 
 # Places this one talks to. There is no center: each place lists the places it
 # trusts, with their keys. `agora place --config agora.yaml` prints this place's
@@ -18,8 +30,7 @@
 # machines to reach it, listen_host must not be loopback only.
 # public_url: http://pc1.tailnet.example:8765
 
-profiles_dir: profiles
-# state_dir: ~/.local/state/agora   # history, bundles, the broker key and the place key
+# state_dir: ~/.local/state/agora   # history, bundles, module cache, the broker key and the place key
 
 listen_host: 127.0.0.1   # 0.0.0.0 (or a VPN address) when other places must reach this one
 listen_port: 8765
@@ -32,6 +43,19 @@ allow_local_runner: false
 docker:
   binary: docker
   network: agora-net        # created on first start; the broker also listens on its gateway
+  # Harness images are built on first use from images/<harness>/Dockerfile at
+  # the harness version the module names (tag agora/<harness>:<version>).
+  # build_args: {BASE_IMAGE: node:22-bookworm-slim}
+  # build_network: host
+
+# How containers reach the outside, for every session (e.g. through a proxy).
+# network:
+#   proxy: http://172.18.0.1:3128
+
+# Per harness, when this machine provides it differently: a prebuilt image,
+# or the ACP command (local runner).
+# harnesses:
+#   claude-code: {image: "sha256:..."}
 
 # Global caps.
 max_sessions: 8          # live managed sessions
@@ -39,6 +63,6 @@ max_spawn_depth: 2       # levels of spawning below the operator / an external s
 
 keep_bundles: false      # keep each session's prepared workspace after it ends
 
-# The broker's own ChatGPT plan login for Codex sessions (runtime.login: chatgpt).
+# The broker's own ChatGPT plan login for Codex sessions (runtimes with login: chatgpt).
 # Create it with `agora codex-login --config agora.yaml`. Default: <state_dir>/codex-login
 # codex_login_dir: ~/.local/state/agora/codex-login

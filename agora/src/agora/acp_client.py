@@ -2,7 +2,7 @@
 
 The broker is the ACP client of every managed session: it creates the ACP
 session, sends prompts, receives session/update notifications and answers
-permission requests according to the profile. It advertises no fs/terminal
+permission requests according to the module (always allowed unless it turned built-in tools off). It advertises no fs/terminal
 capabilities, so the agent works only with its own tools inside the container.
 """
 
@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .jsonrpc import JsonRpcPeer, RpcError, Tap
-from .profiles import Permissions
+from .spec import Permissions
 
 ACP_PROTOCOL_VERSION = 1
 
@@ -85,8 +85,8 @@ class AcpClient:
 
     async def ensure_model(self, session_id: str, result: dict[str, Any], model: str) -> dict[str, Any] | None:
         """Agents that report a model choice (an ACP config option of category
-        "model") may start on another model than the profile names, e.g. when
-        the provider is not configured. Switch to the profile's model when it
+        "model") may start on another model than the module names, e.g. when
+        the provider is not configured. Switch to the module's model when it
         is offered; otherwise refuse, rather than run on a different model."""
         options = [o for o in (result or {}).get("configOptions") or []
                    if o.get("category") == "model" or o.get("id") == "model"]

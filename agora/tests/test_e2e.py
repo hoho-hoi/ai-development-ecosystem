@@ -23,6 +23,8 @@ from helpers import (
     make_repo,
 )
 
+from agora.spec import CLAUDE_BUILTINS  # noqa: E402
+
 SECRET = "agora-secret-value-123456"
 
 
@@ -68,7 +70,7 @@ class BrokerCase(unittest.IsolatedAsyncioTestCase):
 
 class LifecycleTests(BrokerCase):
     async def test_spawn_task_reply_history_terminate(self):
-        st = await self.b.tool("spawn", profile="echo", task="hello there", wait=True)
+        st = await self.b.tool("spawn", module="echo", task="hello there", wait=True)
         self.assertEqual(st["state"], "idle", st)
         sid = st["id"]
         self.assertEqual(st["task_message_id"], self.first_message_id(sid))
@@ -94,7 +96,7 @@ class LifecycleTests(BrokerCase):
         methods = [e["payload"]["frame"].get("method") for e in acp]
         self.assertEqual(methods[:3], ["initialize", "session/new", "session/prompt"])
         spawn_ev = (await self.b.tool("history", session=sid, kinds=["session.spawn"]))["events"][0]
-        self.assertEqual(spawn_ev["payload"]["profile"]["id"], "echo")
+        self.assertEqual(spawn_ev["payload"]["spec"]["module"], "echo")
         self.assertTrue(spawn_ev["payload"]["fingerprint"].startswith("sha256:"))
 
         # tokens and declared secrets never reach disk
@@ -112,12 +114,12 @@ class LifecycleTests(BrokerCase):
         self.assertNotIn(sid, [s["id"] for s in listed])
 
     async def test_isolation_of_environment(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         _, r = await self.ask(st["id"], "ENV")
         env = json.loads(r["body"])
         self.assertTrue(env["home"].startswith(str(self.b.cfg.state_dir / "bundles")), env["home"])
         self.assertEqual(env["files"], ["README.md", "docs", "src", "src/app.py"])  # stripped, pinned to commit a
-        self.assertIn("CLAUDE.md", env["config_files"])  # the profile's instructions
+        self.assertIn("CLAUDE.md", env["config_files"])  # the module's instructions
         self.assertIn("skills/echo-skill/SKILL.md", env["config_files"])
         self.assertNotIn("skills/evil/SKILL.md", env["config_files"])
         self.assertEqual(env["model"], "test-model-1")
@@ -125,7 +127,7 @@ class LifecycleTests(BrokerCase):
         self.assertIsNone(env["leaked_host_var"])  # nothing else from the host env
 
     async def test_bridge_entry_given_to_agent(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         _, r = await self.ask(st["id"], "MCP")
         servers = json.loads(r["body"])
         self.assertEqual(servers[0]["name"], "agora")
@@ -134,7 +136,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(set(env), {"AGORA_BROKER_URL", "AGORA_TOKEN"})  # all tools: no AGORA_TOOLS
 
     async def test_final_text_reaches_no_one(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         sent = await self.b.tool("send", to=st["id"], body="FINAL_ONLY")
         t0 = time.monotonic()
         r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
@@ -146,7 +148,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual((await self.b.tool("receive"))["messages"], [])
 
     async def test_quiet_when_the_other_side_fails(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         await self.b.tool("send", to=st["id"], body="CRASH")
         t0 = time.monotonic()
         r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
@@ -156,13 +158,13 @@ class LifecycleTests(BrokerCase):
         self.assertTrue("exited" in s["end_reason"] or "prompt failed" in s["end_reason"], s["end_reason"])
 
     async def test_waiting_is_not_cut_short_while_work_is_pending(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         sent = await self.b.tool("send", to=st["id"], body="SLEEP 1")
         r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})  # busy: wait for the reply
         self.assertEqual([m["reply_to"] for m in r["messages"]], [sent["message_id"]])
 
     async def test_managed_session_talks_through_bridge(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         _, r = await self.ask(st["id"], 'BRIDGE status {"session": "self"}')
         result = json.loads(r["body"])
         self.assertFalse(result["isError"], result)
@@ -176,7 +178,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual([(m["body"], m["reply_to"]) for m in got], [("hi from inside", None)])
 
     async def test_reply_without_to_goes_to_the_sender(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         await self.ask(st["id"], 'BRIDGE send {"to": "operator", "body": "a question for you"}')
         question = (await self.b.tool("receive", **{"from": st["id"]}))["messages"][0]
         answer = await self.b.tool("send", reply_to=question["message_id"], body="my answer")
@@ -192,7 +194,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(code, 400, body)
 
     async def test_notice_lists_unread_mid_turn(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         first = await self.b.tool("send", to=st["id"], body='DELAY 0.5 BRIDGE status {"session": "self"}')
         await asyncio.sleep(0.1)
         second = await self.b.tool("send", to=st["id"], body="waiting in the mailbox")
@@ -205,7 +207,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual((await self.reply_to(second["message_id"]))["body"], "echo: waiting in the mailbox")
 
     async def test_receive_mid_turn(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         first = await self.b.tool("send", to=st["id"], body='BRIDGE receive {"from": "operator", "wait": 20}')
         await asyncio.sleep(0.5)
         later = await self.b.tool("send", to=st["id"], body="for your receive")
@@ -219,7 +221,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual((r["messages"], r["from_quiet"]), ([], True))
 
     async def test_unread_messages_dropped_at_end(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         await self.b.tool("send", to=st["id"], body="SLEEP 5")
         await asyncio.sleep(0.2)
         waiting = await self.b.tool("send", to=st["id"], body="never read")
@@ -231,7 +233,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(code, 404)
 
     async def test_messages_queue_while_busy(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         first = await self.b.tool("send", to=st["id"], body="SLEEP 1")
         await asyncio.sleep(0.2)
         second = await self.b.tool("send", to=st["id"], body="second")
@@ -246,24 +248,29 @@ class LifecycleTests(BrokerCase):
         self.assertLess(r1["sent_at"], r2["sent_at"])
         self.assertLess(r2["sent_at"], r3["sent_at"])
 
-    async def test_permissions_follow_profile(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+    async def test_permissions_follow_module(self):
+        # permissions are always granted...
+        st = await self.b.tool("spawn", module="echo", wait=True)
         _, ok = await self.ask(st["id"], "PERMISSION edit")
-        _, no = await self.ask(st["id"], "PERMISSION execute")
+        _, ok2 = await self.ask(st["id"], "PERMISSION execute")
         self.assertEqual(json.loads(ok["body"])["outcome"]["optionId"], "allow-once")
-        self.assertEqual(json.loads(no["body"])["outcome"]["optionId"], "reject-once")
+        self.assertEqual(json.loads(ok2["body"])["outcome"]["optionId"], "allow-once")
         perms = (await self.b.tool("history", session=st["id"], kinds=["acp.permission"]))["events"]
         self.assertEqual(len(perms), 2)
+        # ...unless the module turned the harness's built-in tools off
+        st = await self.b.tool("spawn", module="mod", wait=True)
+        _, no = await self.ask(st["id"], "PERMISSION execute")
+        self.assertEqual(json.loads(no["body"])["outcome"]["optionId"], "reject-once")
 
     async def test_send_has_no_idempotency_key(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         code, body = await self.b.post("/api/tools/send", {"to": st["id"], "body": "x", "idempotency_key": "k1"})
         self.assertEqual(code, 400, body)
 
 
-class ModuleProfileTests(BrokerCase):
+class ModuleRunTests(BrokerCase):
     async def test_local_module_per_message_with_send_only(self):
-        st = await self.b.tool("spawn", profile="modlocal", wait=True)
+        st = await self.b.tool("spawn", module="mod", wait=True)
         self.assertEqual(st["state"], "idle", st)
         sid = st["id"]
 
@@ -279,7 +286,7 @@ class ModuleProfileTests(BrokerCase):
         found = json.loads(r["body"])
         self.assertEqual(found["CLAUDE.md"], "You are the test module.\n")
         self.assertEqual(found["skills"], ["mod-skill"])
-        self.assertEqual(found["settings"]["permissions"]["deny"], ["Bash", "WebSearch"])
+        self.assertEqual(found["settings"]["permissions"]["deny"], list(CLAUDE_BUILTINS))  # builtinTools: false
         self.assertEqual(found["settings"]["permissions"]["allow"], ["mcp__agora__send"])  # never blocked by "deny"
 
         # per_message: every message gets a fresh conversation; the old one is closed
@@ -301,10 +308,10 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual(tool["command"], f"{root}/bin/tool")
         _, r = await self.ask(sid, f"READ {root}/bin/tool")
         self.assertEqual(json.loads(r["body"]), "#!/bin/sh\n")
-        _, r = await self.ask(sid, 'BRIDGE spawn {"profile": "echo"}')
+        _, r = await self.ask(sid, 'BRIDGE spawn {"module": "echo"}')
         self.assertEqual(json.loads(r["body"])["rpc_error"]["code"], -32602)  # not offered
         token = self.b.broker.manager.sessions[sid].token
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "echo"}, token)
+        code, body = await self.b.post("/api/tools/spawn", {"module": "echo"}, token)
         self.assertEqual(code, 403, body)
         self.assertIn("not among this session's tools", body["error"])
 
@@ -313,22 +320,22 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual(mod["plugin"]["name"], "mod")
         self.assertIn("io.github.hoho-hoi.agora/AGENTS.md", mod["files"])
 
-    async def test_profile_model_is_enforced(self):
-        # the harness offers the profile's model: agora switches to it
-        st = await self.b.tool("spawn", profile="pickmodel", wait=True)
+    async def test_module_model_is_enforced(self):
+        # the harness offers the module's model: agora switches to it
+        st = await self.b.tool("spawn", module="pickmodel", wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "MODEL")
         self.assertEqual(json.loads(r["body"]), "test-model-1")
         ev = (await self.b.tool("history", session=st["id"], kinds=["session.model"]))["events"][0]["payload"]
         self.assertEqual((ev["reported"], ev["selected"]), ("other-model", "test-model-1"))
         # it does not: the session fails instead of running on another model
-        st = await self.b.tool("spawn", profile="nomodel", wait=True)
+        st = await self.b.tool("spawn", module="nomodel", wait=True)
         self.assertEqual(st["state"], "failed", st)
         ended = (await self.b.tool("history", session=st["id"], kinds=["session.end"]))["events"][0]["payload"]
         self.assertIn("test-model-1", ended["reason"])
 
     async def test_no_broker_tools_means_no_bridge(self):
-        st = await self.b.tool("spawn", profile="notools", wait=True)
+        st = await self.b.tool("spawn", module="notools", wait=True)
         sent = await self.b.tool("send", to=st["id"], body="MCP")
         r = await self.b.tool("receive", **{"from": st["id"], "wait": 20})
         self.assertEqual((r["messages"], r["from_quiet"]), ([], True))  # it cannot answer at all
@@ -337,11 +344,11 @@ class ModuleProfileTests(BrokerCase):
         self.assertEqual([m["name"] for m in servers], ["tool"])
 
     async def test_repo_module_pinned_by_commit(self):
-        # list_profiles fetches pinned modules, so callers can choose by description
-        profiles = {p["id"]: p for p in (await self.b.tool("list_profiles"))["profiles"]}
-        self.assertEqual(profiles["modlocal"]["name"], "mod")
-        self.assertEqual((profiles["modrepo"]["name"], profiles["modrepo"]["description"]), ("peer", "peer module"))
-        st = await self.b.tool("spawn", profile="modrepo", wait=True)
+        # list_modules fetches pinned modules, so callers can choose by description
+        mods = {m["id"]: m for m in (await self.b.tool("list_modules"))["modules"]}
+        self.assertEqual(mods["mod"]["description"], "a module for tests")
+        self.assertEqual(mods["peer"]["description"], "peer module")
+        st = await self.b.tool("spawn", module="peer", wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
         self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the peer.\n")
@@ -355,24 +362,24 @@ class ModuleProfileTests(BrokerCase):
         (mrepo / "peer" / NS / "AGENTS.md").write_text("You are the candidate peer.\n")
         git(mrepo, "commit", "-q", "-am", "candidate")
         candidate = git(mrepo, "rev-parse", "HEAD")
-        st = await self.b.tool("spawn", profile="modrepo", module_ref=candidate, wait=True)
+        st = await self.b.tool("spawn", module="peer", module_ref=candidate, wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
         self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the candidate peer.\n")
         spawn = (await self.b.tool("history", session=st["id"], kinds=["session.spawn"]))["events"][0]["payload"]
-        self.assertEqual((spawn["module_ref_override"], spawn["profile"]["module"]["ref"]), (candidate, candidate))
+        self.assertEqual((spawn["module_ref_override"], spawn["spec"]["source"]["ref"]), (candidate, candidate))
         mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
         self.assertEqual(mod["source"]["ref"], candidate)
-        # only a full commit, and only for a profile whose module is pinned in a repository
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "modrepo", "module_ref": "main"})
+        # only a full commit, and only for a module registered from a repository
+        code, body = await self.b.post("/api/tools/spawn", {"module": "peer", "module_ref": "main"})
         self.assertEqual(code, 400, body)
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "modlocal", "module_ref": candidate})
+        code, body = await self.b.post("/api/tools/spawn", {"module": "mod", "module_ref": candidate})
         self.assertEqual(code, 400, body)
 
     async def test_receive_wait_is_bounded_and_filters(self):
-        st = await self.b.tool("spawn", profile="echo", wait=True)
+        st = await self.b.tool("spawn", module="echo", wait=True)
         slow = await self.b.tool("send", to=st["id"], body="SLEEP 1.5")
-        other = await self.b.tool("spawn", profile="echo", name="other", wait=True)
+        other = await self.b.tool("spawn", module="echo", name="other", wait=True)
         quick = await self.b.tool("send", to=other["id"], body="fast")
         r = await self.b.tool("receive", reply_to=slow["message_id"], wait=0.3)
         self.assertEqual(r["messages"], [])  # timed out; the fast reply is not taken by this filter
@@ -387,7 +394,7 @@ class CodexLoginTests(BrokerCase):
     broker's plan login; the refresh token never leaves the broker."""
 
     async def test_session_gets_access_only_copy(self):
-        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        st = await self.b.tool("spawn", module="codexplan", wait=True)
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "CODEX_AUTH")
         seen = json.loads(r["body"])
@@ -413,13 +420,13 @@ class CodexLoginTests(BrokerCase):
 
     async def test_session_refused_when_login_would_expire(self):
         make_codex_login(self.b.cfg.codex_login_path, expires_in=600)  # 10 min left, run may take 5 min + margin
-        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        st = await self.b.tool("spawn", module="codexplan", wait=True)
         self.assertEqual(st["state"], "failed", st)
         self.assertIn("agora codex-login", st["end_reason"])
 
     async def test_session_refused_without_login(self):
         (self.b.cfg.codex_login_path / "auth.json").unlink()
-        st = await self.b.tool("spawn", profile="codexplan", wait=True)
+        st = await self.b.tool("spawn", module="codexplan", wait=True)
         self.assertEqual(st["state"], "failed", st)
         self.assertIn("no Codex login", st["end_reason"])
 
@@ -433,35 +440,35 @@ class PolicyTests(BrokerCase):
     async def test_spawn_policy_and_depth(self):
         ext = await self.register()
         # external may spawn echo, not locked
-        st = await self.b.tool("spawn", ext["token"], profile="echo", wait=True)
+        st = await self.b.tool("spawn", ext["token"], module="echo", wait=True)
         self.assertEqual(st["state"], "idle")
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "locked"}, ext["token"])
+        code, body = await self.b.post("/api/tools/spawn", {"module": "locked"}, ext["token"])
         self.assertEqual(code, 403, body)
         # a managed echo session (depth 1, budget 1) may spawn echo once more,
         # but that child (budget 0) may not spawn again
         child_token = self.b.broker.manager.sessions[st["id"]].token
-        grand = await self.b.tool("spawn", child_token, profile="echo", wait=True)
+        grand = await self.b.tool("spawn", child_token, module="echo", wait=True)
         self.assertEqual(grand["depth"], 2)
         grand_token = self.b.broker.manager.sessions[grand["id"]].token
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "echo"}, grand_token)
+        code, body = await self.b.post("/api/tools/spawn", {"module": "echo"}, grand_token)
         self.assertEqual(code, 403)
         self.assertIn("no spawn depth left", body["error"])
 
     async def test_only_spawner_or_operator_terminates(self):
         a = await self.register("a")
         other = await self.register("b")
-        st = await self.b.tool("spawn", a["token"], profile="echo", wait=True)
+        st = await self.b.tool("spawn", a["token"], module="echo", wait=True)
         code, _ = await self.b.post("/api/tools/terminate", {"session": st["id"]}, other["token"])
         self.assertEqual(code, 403)
         done = await self.b.tool("terminate", a["token"], session=st["id"])
         self.assertEqual(done["state"], "terminated")
 
     async def test_bad_requests(self):
-        code, body = await self.b.post("/api/tools/spawn", {"profile": "echo", "bogus": 1})
+        code, body = await self.b.post("/api/tools/spawn", {"module": "echo", "bogus": 1})
         self.assertEqual(code, 400)
-        code, _ = await self.b.post("/api/tools/spawn", {"profile": "nope"})
+        code, _ = await self.b.post("/api/tools/spawn", {"module": "nope"})
         self.assertEqual(code, 404)
-        code, _ = await self.b.post("/api/tools/list_profiles", {}, token="wrong")
+        code, _ = await self.b.post("/api/tools/list_modules", {}, token="wrong")
         self.assertEqual(code, 403)
         code, _ = await self.b.post("/api/register", {"name": "x"}, token="wrong")
         self.assertEqual(code, 403)
@@ -482,13 +489,13 @@ class BridgeTests(BrokerCase):
                 await client.initialize()
                 tools = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
-                    tools, ["send", "receive", "list_profiles", "spawn", "clone", "list_sessions", "status", "terminate",
+                    tools, ["send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate",
                             "history"]
                 )
-                res = await client.call_tool("list_profiles", {})
-                profiles = json.loads(res.content[0].text)["profiles"]
+                res = await client.call_tool("list_modules", {})
+                mods = json.loads(res.content[0].text)["modules"]
                 self.assertEqual(
-                    sorted(p["id"] for p in profiles), ["codexplan", "echo", "locked", "modlocal", "modrepo", "noload", "nomodel", "notools", "pickmodel"]
+                    sorted(m["id"] for m in mods), ["codexplan", "echo", "locked", "mod", "noload", "nomodel", "notools", "peer", "pickmodel"]
                 )
                 # annotations let harnesses call the messaging tools without asking
                 listed = {t.name: t.annotations for t in (await client.list_tools()).tools}
@@ -496,7 +503,7 @@ class BridgeTests(BrokerCase):
                 self.assertTrue(listed["terminate"].destructive_hint)
                 self.assertTrue(listed["history"].read_only_hint)
 
-                res = await client.call_tool("spawn", {"profile": "echo", "task": "via bridge"})
+                res = await client.call_tool("spawn", {"module": "echo", "task": "via bridge"})
                 self.assertFalse(res.is_error, res.content)
                 st = json.loads(res.content[0].text)
                 self.assertEqual(st["state"], "idle")

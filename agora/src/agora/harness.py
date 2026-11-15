@@ -1,6 +1,6 @@
 """Per-harness configuration for a session.
 
-Each session gets its own harness config directory, built from the profile
+Each session gets its own harness config directory, built from the module
 alone, so nothing from the host's ~/.claude, ~/.codex or the project leaks in.
 `host_dir` is where the files are written on the host; `runtime_dir` is the
 path the same directory has inside the session (container or local run).
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .modules import ModuleCache, ResolvedModule
-from .profiles import Profile
+from .spec import Spec
 
 
 def _copy_skills(skill_dirs: list[Path], dest: Path) -> list[str]:
@@ -33,7 +33,7 @@ OPENCODE_AGENT = "agora"  # the one agent of an OpenCode session
 
 
 def prepare_harness_config(
-    profile: Profile,
+    spec: Spec,
     host_dir: Path,
     runtime_dir: str,
     instructions: str | None,
@@ -41,8 +41,8 @@ def prepare_harness_config(
 ) -> dict[str, str]:
     """Write the harness config under host_dir and return the env vars that
     point the harness at it. `instructions` and `skill_dirs` come from the
-    profile's module (or its inline definition)."""
-    rt = profile.runtime
+    module."""
+    rt = spec.runtime
     env: dict[str, str] = {"AGORA_MODEL": rt.model}
 
     if rt.harness == "claude-code":
@@ -53,8 +53,8 @@ def prepare_harness_config(
         _copy_skills(skill_dirs, d / "skills")
         settings: dict[str, object] = {}
         perms: dict[str, list[str]] = {}
-        # The broker tools the profile grants are allowed outright: they are
-        # how the agent talks, so a "deny" profile must not block them.
+        # The agora tools the module gets are allowed outright: they are how
+        # the agent talks, so turning built-in tools off must not block them.
         allow = list(rt.permissions.allowed_tools) + [f"mcp__{BRIDGE_SERVER}__{t}" for t in rt.broker_tools]
         if allow:
             perms["allow"] = allow
@@ -83,18 +83,18 @@ def prepare_harness_config(
         if instructions is not None:
             (d / "AGENTS.md").write_text(instructions, encoding="utf-8")
         else:
-            # No profile instructions: make sure no AGENTS.md is read at all.
+            # No instructions: make sure no AGENTS.md is read at all.
             lines.append("project_doc_max_bytes = 0")
         _copy_skills(skill_dirs, d / "skills")
         (d / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         env["CODEX_HOME"] = f"{runtime_dir}/codex"
         # codex-acp: no browser login offered; approvals go to the broker
-        # (read-only for deny profiles, workspace writes otherwise), not to
+        # (read-only without built-in tools, workspace writes otherwise), not to
         # Codex's own auto reviewer.
         env["NO_BROWSER"] = "1"
         env["INITIAL_AGENT_MODE"] = "read-only" if rt.permissions.mode == "deny" else "workspace-write"
     elif rt.harness == "opencode":
-        # OpenCode V2 (`opencode acp`). The whole config comes from the profile:
+        # OpenCode V2 (`opencode acp`). The whole config comes from the module:
         # one agent built from the module's instructions, the module's skills,
         # and private XDG dirs so no host or project config, auth or session
         # store is read. Tool permissions are asked over ACP and answered by
@@ -147,7 +147,7 @@ def prepare_harness_config(
 
 @dataclass
 class Definition:
-    """What the agent is: from the profile's module, or its inline definition."""
+    """What the agent is: its module's instructions, skills and files."""
 
     instructions: str | None
     skill_dirs: list[Path]
@@ -155,21 +155,18 @@ class Definition:
     module: ResolvedModule | None = None
 
 
-def resolve_definition(profile: Profile, cache: "ModuleCache") -> Definition:
-    if profile.module:
-        base = profile.source.parent if profile.source else None
-        mod = cache.resolve(profile.module, base)
-        return Definition(mod.instructions_text(), mod.skill_dirs(), mod.manifest(), mod)
-    return Definition(profile.instructions_text(), profile.skill_dirs())
+def resolve_definition(spec: Spec) -> Definition:
+    mod = spec.module
+    return Definition(mod.instructions_text(), mod.skill_dirs(), mod.manifest(), mod)
 
 
 # Files in a harness dir that hold credentials: never collected into history.
 CREDENTIAL_FILES = {"codex": ("auth.json",)}
 
 
-def harness_record_dir(profile: Profile) -> str:
+def harness_record_dir(spec: Spec) -> str:
     """Subdirectory (under the session's agora dir) that holds the harness's own
     session records, collected into history when the session ends."""
     return {"claude-code": "claude", "codex": "codex", "opencode": "opencode"}.get(
-        profile.runtime.harness, profile.runtime.harness
+        spec.runtime.harness, spec.runtime.harness
     )

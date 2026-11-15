@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .profiles import COMMIT_RE, Profile
+from .spec import COMMIT_RE, Workspace
 
 
 class WorkspaceError(RuntimeError):
@@ -57,14 +57,9 @@ def strip_tree(root: Path, names: list[str]) -> list[str]:
     return sorted(removed)
 
 
-def prepare_workspace(profile: Profile, dest: Path, ref_override: str | None = None) -> dict[str, Any]:
+def prepare_workspace(ws: Workspace, dest: Path) -> dict[str, Any]:
     """Create the session workspace in `dest` (which must not exist yet)."""
-    ws = profile.workspace
-    ref = ref_override or ws.ref
-    if ref_override and not COMMIT_RE.match(ref_override):
-        raise WorkspaceError("ref override must be a full commit SHA")
-    if ref_override and not ws.repo:
-        raise WorkspaceError("ref override given but the profile has no workspace.repo")
+    ref = ws.ref
 
     manifest: dict[str, Any] = {"repo": ws.repo, "ref": ref, "head": None, "removed": []}
     if ws.repo:
@@ -76,5 +71,5 @@ def prepare_workspace(profile: Profile, dest: Path, ref_override: str | None = N
         manifest["head"] = head
     else:
         dest.mkdir(parents=True)
-    manifest["removed"] = strip_tree(dest, ws.strip_names())
+    manifest["removed"] = strip_tree(dest, list(ws.strip))
     return manifest

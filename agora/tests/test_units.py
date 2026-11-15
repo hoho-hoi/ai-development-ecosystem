@@ -4,69 +4,140 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_DIGEST, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo, write_profiles
+import os
+from unittest import mock
+
+from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo
 
 from agora.acp_client import decide_permission
 from agora.harness import harness_record_dir, prepare_harness_config, resolve_definition
 from agora.logins import LoginError, load_chatgpt_login, write_access_only
 from agora.modules import ModuleCache, load_local
-from agora.profiles import DEFAULT_STRIP, Permissions, load_profile, profile_from_dict
+from agora.spec import (BROKER_TOOLS, CLAUDE_BUILTINS, DEFAULT_STRIP, Catalog, HarnessOverride, ModuleSource,
+                        Network, Permissions, Workspace, load_module_dir, resolve)
 from agora.runner.docker import build_create_args, pack_bundle
 from agora.store import HistoryStore
 from agora.workspace import WorkspaceError, prepare_workspace
 
 
-def minimal(**over):
-    data = {
-        "id": "p",
-        "version": "1",
-        "name": "P",
-        "description": "d",
-        "runtime": {"harness": "claude-code", "adapter": "claude-agent-acp", "model": "m", "image": FAKE_DIGEST},
-    }
-    for k, v in over.items():
-        data[k] = {**data.get(k, {}), **v} if isinstance(v, dict) else v
-    return data
+_counter = [0]
 
 
-class ProfileTests(unittest.TestCase):
-    def test_examples_load(self):
-        for f in (ROOT / "profiles" / "examples").glob("*.yaml"):
-            p = load_profile(f)
-            self.assertTrue(p.fingerprint.startswith("sha256:"), f)
-            self.assertEqual(p.agent_card()["id"], p.id)
+def make_spec(root: Path, runtime: dict | None = None, ext: dict | None = None, instructions: str | None = None,
+              skill: bool = False, workspace: dict | None = None, network: dict | None = None,
+              harnesses: dict | None = None, name: str = "m"):
+    """A module directory with the given agora extension, resolved for a spawn."""
+    _counter[0] += 1
+    d = root / f"{name}-{_counter[0]}"
+    d.mkdir(parents=True)
+    rt = {"harness": "claude-code", "version": "1.0.0", "model": "m", **(runtime or {})}
+    extension = {"runtimes": [rt], **(ext or {})}
+    (d / "plugin.json").write_text(plugin_json(name, "d", version="1", extensions={NS: extension}))
+    if instructions is not None:
+        (d / NS).mkdir()
+        (d / NS / "AGENTS.md").write_text(instructions)
+    if skill:
+        (d / "skills" / "echo-skill").mkdir(parents=True)
+        (d / "skills" / "echo-skill" / "SKILL.md").write_text("---\nname: echo-skill\ndescription: test\n---\n")
+    return resolve(
+        load_module_dir(d), ModuleSource(local=str(d)),
+        workspace=Workspace.model_validate(workspace or {}),
+        network=Network.model_validate(network or {}),
+        harnesses={k: HarnessOverride.model_validate(v) for k, v in (harnesses or {}).items()},
+    )
 
-    def test_image_must_be_pinned(self):
-        with self.assertRaisesRegex(ValueError, "pinned by digest"):
-            profile_from_dict(minimal(runtime={"image": "agora/claude-code:latest"}))
-        profile_from_dict(minimal(runtime={"image": "reg.example/x@sha256:" + "b" * 64}))
 
-    def test_ref_must_be_a_commit(self):
+class SpecTests(unittest.TestCase):
+    def test_example_modules_load(self):
+        for d in (ROOT / "examples" / "modules").iterdir():
+            mod = load_module_dir(d)
+            self.assertTrue(mod.plugin.agora.runtimes, d)
+
+    def test_first_runtime_this_place_can_run(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(os.environ, {"HAVE_IT": "tok-123456"}, clear=False):
+            os.environ.pop("MISSING_VAR", None)
+            ext = {"runtimes": [
+                {"harness": "nope", "version": "1", "model": "x"},
+                {"harness": "claude-code", "version": "1", "model": "sonnet", "env": {"CLAUDE_CODE_OAUTH_TOKEN": "${MISSING_VAR}"}},
+                {"harness": "opencode", "version": "2", "model": "opencode/free", "env": {"T": "${HAVE_IT}", "MODE": "x"}},
+            ]}
+            spec = make_spec(Path(t), ext=ext)
+            rt = spec.runtime
+            self.assertEqual((rt.harness, rt.model, rt.option_index), ("opencode", "opencode/free", 2))
+            self.assertEqual(rt.adapter, ["opencode", "acp"])
+            self.assertEqual((rt.env, rt.secret_env), ({"MODE": "x"}, {"T": "HAVE_IT"}))
+            self.assertEqual(rt.secret_values(), {"T": "tok-123456"})
+            with self.assertRaisesRegex(ValueError, "MISSING_VAR"):
+                make_spec(Path(t), ext={"runtimes": ext["runtimes"][:2]})
+            with self.assertRaisesRegex(ValueError, "no runtimes"):
+                make_spec(Path(t), ext={"runtimes": []})
+
+    def test_env_values_are_literal_or_one_reference(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(os.environ, {"A": "1"}):
+            with self.assertRaisesRegex(ValueError, "literal or exactly one"):
+                make_spec(Path(t), runtime={"env": {"X": "Bearer ${A}"}})
+            with self.assertRaises(ValueError):
+                make_spec(Path(t), runtime={"env": {"bad name": "x"}})
+
+    def test_workspace_ref_must_be_a_commit(self):
         with self.assertRaisesRegex(ValueError, "full commit SHA"):
-            profile_from_dict(minimal(workspace={"repo": "/r", "ref": "main"}))
+            Workspace.model_validate({"repo": "/r", "ref": "main"})
         with self.assertRaisesRegex(ValueError, "required"):
-            profile_from_dict(minimal(workspace={"repo": "/r"}))
+            Workspace.model_validate({"repo": "/r"})
+        self.assertEqual(Workspace().strip, list(DEFAULT_STRIP))
 
-    def test_secret_names_only(self):
-        with self.assertRaises(ValueError):
-            profile_from_dict(minimal(runtime={"secrets": ["sk-ant-123"]}))
+    def test_unknown_extension_fields_rejected(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaises(ValueError):
+                make_spec(Path(t), ext={"permissions": {"mode": "deny"}})
+            with self.assertRaises(ValueError):
+                make_spec(Path(t), runtime={"image": "sha256:" + "a" * 64})
 
-    def test_default_strip_and_extra(self):
-        p = profile_from_dict(minimal(workspace={"stripExtra": ["*.local.json"]}))
-        self.assertEqual(p.workspace.strip_names(), [*DEFAULT_STRIP, "*.local.json"])
-
-    def test_unknown_fields_rejected(self):
-        with self.assertRaises(ValueError):
-            profile_from_dict(minimal(runtime={"imgae": FAKE_DIGEST}))
-
-    def test_fingerprint_tracks_referenced_files(self):
+    def test_tools_and_builtin_tools(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
-            repo, a, _ = make_repo(t)
-            write_profiles(t / "profiles", repo, a)
-            before = load_profile(t / "profiles" / "echo.yaml").fingerprint
-            (t / "profiles" / "echo-instructions.md").write_text("changed\n")
-            self.assertNotEqual(before, load_profile(t / "profiles" / "echo.yaml").fingerprint)
+            spec = make_spec(t)
+            self.assertEqual(spec.runtime.broker_tools, list(BROKER_TOOLS))
+            self.assertEqual((spec.runtime.permissions.mode, spec.runtime.permissions.denied_tools), ("allow", []))
+            spec = make_spec(t, ext={"tools": ["send"], "builtinTools": False})
+            self.assertEqual(spec.runtime.broker_tools, ["send"])
+            self.assertEqual(spec.runtime.permissions.mode, "deny")
+            self.assertEqual(spec.runtime.permissions.denied_tools, list(CLAUDE_BUILTINS))
+            self.assertEqual(make_spec(t, ext={"tools": False}).runtime.broker_tools, [])
+            with self.assertRaisesRegex(ValueError, "unknown agora tool"):
+                make_spec(t, ext={"tools": ["list_profiles"]})
+
+    def test_place_can_name_an_image_or_command(self):
+        with tempfile.TemporaryDirectory() as t:
+            spec = make_spec(Path(t), harnesses={"claude-code": {"image": "sha256:" + "b" * 64, "adapter": ["x", "y"]}})
+            self.assertEqual((spec.runtime.image, spec.runtime.adapter), ("sha256:" + "b" * 64, ["x", "y"]))
+            self.assertIsNone(make_spec(Path(t)).runtime.image)
+
+    def test_fingerprint_tracks_module_files_and_runtime(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            spec = make_spec(t, instructions="one")
+            d = Path(spec.source.local)
+            again = resolve(load_module_dir(d), spec.source)
+            self.assertEqual(spec.fingerprint, again.fingerprint)
+            (d / NS / "AGENTS.md").write_text("two")
+            self.assertNotEqual(spec.fingerprint, resolve(load_module_dir(d), spec.source).fingerprint)
+            ws = resolve(load_module_dir(d), spec.source, workspace=Workspace(repo="/r", ref="a" * 40))
+            self.assertNotEqual(ws.fingerprint, resolve(load_module_dir(d), spec.source).fingerprint)
+
+    def test_catalog_lists_registered_modules(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            mrepo, commit = make_module_repo(t)
+            cat = Catalog([ModuleSource(local=str(mrepo), path="agent"),
+                           ModuleSource(repo=str(mrepo), ref=commit, path="peer"),
+                           ModuleSource(local=str(t / "missing"))], ModuleCache(t / "cache"))
+            cards, errors = cat.cards()
+            self.assertEqual(sorted(c["id"] for c in cards), ["mod", "peer"])
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(cat.get("peer").source.ref, commit)
+            with self.assertRaises(KeyError):
+                cat.get("nope")
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -74,8 +145,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             repo, a, b = make_repo(t)
-            p = profile_from_dict(minimal(workspace={"repo": str(repo), "ref": a}))
-            m = prepare_workspace(p, t / "ws")
+            m = prepare_workspace(Workspace(repo=str(repo), ref=a), t / "ws")
             self.assertEqual(m["head"], a)
             files = sorted(str(f.relative_to(t / "ws")) for f in (t / "ws").rglob("*") if ".git" not in f.parts)
             self.assertEqual(files, ["README.md", "docs", "src", "src/app.py"])
@@ -85,22 +155,13 @@ class WorkspaceTests(unittest.TestCase):
             self.assertFalse((t / "ws" / "later.txt").exists())  # commit b is not there
             self.assertTrue((t / "ws" / ".git").is_dir())
 
-            m2 = prepare_workspace(p, t / "ws2", ref_override=b)
+            m2 = prepare_workspace(Workspace(repo=str(repo), ref=b), t / "ws2")
             self.assertEqual(m2["head"], b)
             self.assertTrue((t / "ws2" / "later.txt").exists())
 
-    def test_override_must_be_sha(self):
-        with tempfile.TemporaryDirectory() as t:
-            t = Path(t)
-            repo, a, _ = make_repo(t)
-            p = profile_from_dict(minimal(workspace={"repo": str(repo), "ref": a}))
-            with self.assertRaises(WorkspaceError):
-                prepare_workspace(p, t / "ws", ref_override="main")
-
     def test_no_repo_gives_empty_workspace(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal())
-            m = prepare_workspace(p, Path(t) / "ws")
+            m = prepare_workspace(Workspace(), Path(t) / "ws")
             self.assertEqual(m["removed"], [])
             self.assertEqual(list((Path(t) / "ws").iterdir()), [])
 
@@ -109,32 +170,30 @@ class HarnessConfigTests(unittest.TestCase):
     def test_claude_code_config(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
-            repo, a, _ = make_repo(t)
-            write_profiles(t / "profiles", repo, a)
-            p = load_profile(t / "profiles" / "echo.yaml")
-            env = prepare_harness_config(p, t / "agora", "/home/agent/.agora", p.instructions_text(), p.skill_dirs())
+            spec = make_spec(t, runtime={"model": "test-model-1"}, instructions="You are the echo module.\n", skill=True)
+            d = resolve_definition(spec)
+            env = prepare_harness_config(spec, t / "agora", "/home/agent/.agora", d.instructions, d.skill_dirs)
             self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/home/agent/.agora/claude")
             self.assertEqual(env["ANTHROPIC_MODEL"], "test-model-1")
-            self.assertEqual((t / "agora/claude/CLAUDE.md").read_text(), "You are the echo profile.\n")
+            self.assertEqual((t / "agora/claude/CLAUDE.md").read_text(), "You are the echo module.\n")
             self.assertTrue((t / "agora/claude/skills/echo-skill/SKILL.md").is_file())
 
     def test_codex_without_instructions_disables_agents_md(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp"}))
-            env = prepare_harness_config(p, Path(t), "/rt", None, [])
+            spec = make_spec(Path(t), runtime={"harness": "codex"})
+            env = prepare_harness_config(spec, Path(t) / "o", "/rt", None, [])
             self.assertEqual(env["CODEX_HOME"], "/rt/codex")
-            self.assertIn("project_doc_max_bytes = 0", (Path(t) / "codex/config.toml").read_text())
+            self.assertIn("project_doc_max_bytes = 0", (Path(t) / "o/codex/config.toml").read_text())
 
 
 class OpencodeHarnessTests(unittest.TestCase):
-    def test_opencode_config_is_isolated_and_built_from_the_profile(self):
+    def test_opencode_config_is_isolated_and_built_from_the_module(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             skill = t / "src-skill" / "hello"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text("---\nname: hello\ndescription: x\n---\n")
-            p = profile_from_dict(minimal(runtime={"harness": "opencode", "adapter": "opencode acp",
-                                                   "model": "anthropic/claude-haiku-5-5"}))
+            p = make_spec(t, runtime={"harness": "opencode", "model": "anthropic/claude-haiku-5-5"})
             env = prepare_harness_config(p, t / "out", "/rt", "You are the role.", [skill])
             d = t / "out" / "opencode"
             cfg = json.loads((d / "opencode.json").read_text())
@@ -158,10 +217,9 @@ class OpencodeHarnessTests(unittest.TestCase):
 
     def test_opencode_without_instructions_has_no_system(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal(runtime={"harness": "opencode", "adapter": "opencode acp",
-                                                   "model": "anthropic/claude-haiku-5-5"}))
-            prepare_harness_config(p, Path(t), "/rt", None, [])
-            cfg = json.loads((Path(t) / "opencode/opencode.json").read_text())
+            p = make_spec(Path(t), runtime={"harness": "opencode", "model": "anthropic/claude-haiku-5-5"})
+            prepare_harness_config(p, Path(t) / "o", "/rt", None, [])
+            cfg = json.loads((Path(t) / "o/opencode/opencode.json").read_text())
             self.assertNotIn("system", cfg["agents"]["agora"])
 
 
@@ -173,65 +231,30 @@ class ModuleTests(unittest.TestCase):
             f.write_text(text)
         return root
 
-    def test_module_ref_validation(self):
+    def test_module_source_validation(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
-            profile_from_dict(minimal(module={"path": "agent"}))
+            ModuleSource(path="agent")
         with self.assertRaisesRegex(ValueError, "full commit SHA"):
-            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "main"}))
+            ModuleSource(repo="https://x/y.git", ref="main")
         with self.assertRaisesRegex(ValueError, "relative path"):
-            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40, "path": "../x"}))
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40},
-                                      runtime={"instructions": "./x.md"}))
-        with self.assertRaisesRegex(ValueError, "name and description"):
-            data = minimal()
-            del data["name"]
-            profile_from_dict(data)
-
-    def test_module_path_defaults_to_repository_root(self):
-        self.assertEqual(profile_from_dict(minimal(module={"repo": "https://x/y.git", "ref": "a" * 40})).module.path, ".")
-        with tempfile.TemporaryDirectory() as t:
-            m = self.write(Path(t), {"plugin.json": plugin_json("root", "at the root")})
-            data = minimal(module={"local": str(m)})
-            del data["name"], data["description"]
-            self.assertEqual(profile_from_dict(data).agent_card()["name"], "root")
-
-    def test_local_module_names_and_fingerprint(self):
-        with tempfile.TemporaryDirectory() as t:
-            t = Path(t)
-            mrepo, _ = make_module_repo(t)
-            data = minimal(module={"local": str(mrepo), "path": "agent"})
-            del data["name"], data["description"]
-            p = profile_from_dict(data)
-            self.assertEqual(p.agent_card()["name"], "mod")
-            self.assertEqual(p.agent_card()["description"], "a module for tests")
-            before = p.fingerprint
-            (mrepo / "agent" / NS / "AGENTS.md").write_text("changed\n")
-            self.assertNotEqual(before, profile_from_dict(data).fingerprint)
+            ModuleSource(repo="https://x/y.git", ref="a" * 40, path="../x")
+        self.assertEqual(ModuleSource(repo="https://x/y.git", ref="a" * 40).path, ".")
 
     def test_repo_module_fetch_and_definition(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             mrepo, commit = make_module_repo(t)
             cache = ModuleCache(t / "cache")
-            ref = {"repo": str(mrepo), "ref": commit, "path": "agent"}
-            bare = minimal(module=ref)
-            del bare["description"]
-            self.assertIn("not fetched yet", profile_from_dict(bare, cache=cache).agent_card()["description"])
-            p = profile_from_dict(minimal(module=ref), cache=cache)
-            d = resolve_definition(p, cache)
+            src = ModuleSource(repo=str(mrepo), ref=commit, path="agent")
+            spec = resolve(cache.resolve(src, None), src)
+            d = resolve_definition(spec)
             self.assertEqual(d.instructions, "You are the test module.\n")
             self.assertEqual([x.name for x in d.skill_dirs], ["mod-skill"])
             self.assertEqual(d.manifest["source"]["ref"], commit)
             self.assertEqual(d.manifest["plugin"]["version"], "1.2.0")
             self.assertIn(f"{NS}/AGENTS.md", d.manifest["files"])
             self.assertNotIn("../docs/purpose.md", d.manifest["files"])
-            # cached now: the registry shows the module's own name
-            p2 = profile_from_dict(minimal(module=ref), cache=cache)
-            self.assertEqual(p2.agent_card()["description"], "d")  # profile description wins
-            data = minimal(module=ref)
-            del data["description"]
-            self.assertEqual(profile_from_dict(data, cache=cache).agent_card()["description"], "a module for tests")
+            self.assertTrue(cache.cached(str(mrepo), commit))
 
     def test_plugin_json_is_the_marker_and_is_closed(self):
         with tempfile.TemporaryDirectory() as t:
@@ -316,25 +339,27 @@ class ModuleTests(unittest.TestCase):
                     load_local(self.write(t / d, {"plugin.json": plugin_json("m"), "mcp.json": json.dumps(
                         {"$schema": MCP_SCHEMA, "mcpServers": servers})}), {})
 
-    def test_denied_tools_in_claude_settings(self):
+    def test_builtin_tools_off_in_claude_settings(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal(runtime={"permissions": {"deniedTools": ["Bash", "WebFetch"]},
-                                                   "brokerTools": ["send", "receive"]}))
-            prepare_harness_config(p, Path(t), "/rt", "hi", [])
-            settings = json.loads((Path(t) / "claude/settings.json").read_text())
-            self.assertEqual(settings["permissions"]["deny"], ["Bash", "WebFetch"])
-            # the broker tools the profile grants are allowed outright
+            p = make_spec(Path(t), ext={"tools": ["send", "receive"], "builtinTools": False})
+            prepare_harness_config(p, Path(t) / "o", "/rt", "hi", [])
+            settings = json.loads((Path(t) / "o/claude/settings.json").read_text())
+            self.assertEqual(settings["permissions"]["deny"], list(CLAUDE_BUILTINS))
+            # the agora tools the module gets are allowed outright
             self.assertEqual(settings["permissions"]["allow"], ["mcp__agora__send", "mcp__agora__receive"])
 
 
 class DockerArgsTests(unittest.TestCase):
     def test_create_args(self):
-        p = profile_from_dict(
-            minimal(runtime={"secrets": ["CLAUDE_CODE_OAUTH_TOKEN"]}, limits={"memory": "2g", "cpus": 1.5})
-        )
-        args = build_create_args("docker", "s-1", p, {"CLAUDE_CONFIG_DIR": "/home/agent/.agora/claude"}, "agora-net")
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(os.environ, {"MY_TOKEN": "tok-123456"}):
+            p = make_spec(Path(t), runtime={"env": {"CLAUDE_CODE_OAUTH_TOKEN": "${MY_TOKEN}"}})
+        p.limits.memory, p.limits.cpus = "2g", 1.5
+        image = "sha256:" + "a" * 64
+        args = build_create_args("docker", "s-1", p, {"CLAUDE_CONFIG_DIR": "/home/agent/.agora/claude"}, "agora-net",
+                                 image=image)
         self.assertEqual(args[:2], ["docker", "create"])
-        self.assertEqual(args[-2:], [FAKE_DIGEST, "claude-agent-acp"])
+        self.assertEqual(args[-2:], [image, "claude-agent-acp"])
+        self.assertNotIn("tok-123456", " ".join(args))
         joined = " ".join(args)
         for flag in ("--volume", "-v ", "--mount", "--privileged"):
             self.assertNotIn(flag, joined)
@@ -346,7 +371,8 @@ class DockerArgsTests(unittest.TestCase):
         self.assertEqual(args[i - 1], "--env")  # name only, value comes from the CLI env
 
     def test_network_none(self):
-        p = profile_from_dict(minimal(network={"mode": "none"}))
+        with tempfile.TemporaryDirectory() as t:
+            p = make_spec(Path(t), network={"mode": "none"})
         args = build_create_args("docker", "s-1", p, {}, "agora-net")
         self.assertIn("none", args)
         self.assertNotIn("host.docker.internal:host-gateway", args)
@@ -376,7 +402,7 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(out["outcome"], {"outcome": "selected", "optionId": "a"})
 
     def test_kind_not_allowed(self):
-        pol = Permissions(mode="allow", allowKinds=["read"])
+        pol = Permissions(mode="allow", allow_kinds=["read"])
         out = decide_permission({"options": self.opts, "toolCall": {"kind": "execute"}}, pol)
         self.assertEqual(out["outcome"]["optionId"], "r")
 
@@ -426,25 +452,6 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(st.unread_by_sender("me"), [("a", None, 2)])
             st.close()
 
-    def test_broker_tools_setting(self):
-        base = {"id": "p", "version": "1", "name": "p", "description": "d",
-                "runtime": {"harness": "claude-code", "adapter": "x", "model": "m", "image": FAKE_DIGEST}}
-        def tools(v):
-            data = json.loads(json.dumps(base))
-            if v is not None:
-                data["runtime"]["brokerTools"] = v
-            return profile_from_dict(data, Path(".")).runtime.broker_tools
-        self.assertEqual(tools(None)[:2], ["send", "receive"])
-        self.assertEqual(len(tools(True)), 9)
-        self.assertEqual(tools(False), [])
-        self.assertEqual(tools(["send"]), ["send"])
-        with self.assertRaises(Exception):
-            tools(["send", "spawm"])
-        data = json.loads(json.dumps(base))
-        data["runtime"]["messageFormat"] = "body"  # removed in v0.4
-        with self.assertRaises(Exception):
-            profile_from_dict(data, Path("."))
-
 class CodexLoginTests(unittest.TestCase):
     def test_load_and_access_only_copy(self):
         with tempfile.TemporaryDirectory() as t:
@@ -482,20 +489,19 @@ class CodexLoginTests(unittest.TestCase):
 
     def test_codex_harness_config(self):
         with tempfile.TemporaryDirectory() as t:
-            p = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp", "login": "chatgpt",
-                                                   "permissions": {"mode": "deny"}}))
-            env = prepare_harness_config(p, Path(t), "/rt", "be brief", [])
-            conf = (Path(t) / "codex/config.toml").read_text()
+            p = make_spec(Path(t), runtime={"harness": "codex", "login": "chatgpt"}, ext={"builtinTools": False})
+            env = prepare_harness_config(p, Path(t) / "o", "/rt", "be brief", [])
+            conf = (Path(t) / "o/codex/config.toml").read_text()
             self.assertIn('cli_auth_credentials_store = "file"', conf)
             self.assertIn('web_search = "disabled"', conf)
             self.assertEqual((env["NO_BROWSER"], env["INITIAL_AGENT_MODE"]), ("1", "read-only"))
-            allow = profile_from_dict(minimal(runtime={"harness": "codex", "adapter": "codex-acp"}))
+            allow = make_spec(Path(t), runtime={"harness": "codex"})
             self.assertEqual(prepare_harness_config(allow, Path(t) / "b", "/rt", None, [])["INITIAL_AGENT_MODE"],
                              "workspace-write")
 
     def test_login_needs_codex(self):
-        with self.assertRaisesRegex(Exception, "needs runtime.harness: codex"):
-            profile_from_dict(minimal(runtime={"login": "chatgpt"}))
+        with tempfile.TemporaryDirectory() as t, self.assertRaisesRegex(Exception, "needs harness: codex"):
+            make_spec(Path(t), runtime={"login": "chatgpt"})
 
     def test_bridge_tools_are_annotated(self):
         from agora.bridge import TOOLS
@@ -504,7 +510,7 @@ class CodexLoginTests(unittest.TestCase):
         for name in ("send", "receive", "spawn", "clone"):
             self.assertEqual((ann[name]["destructiveHint"], ann[name]["openWorldHint"]), (False, False), name)
         self.assertTrue(ann["terminate"]["destructiveHint"])
-        for name in ("list_profiles", "list_sessions", "status", "history"):
+        for name in ("list_modules", "list_sessions", "status", "history"):
             self.assertTrue(ann[name]["readOnlyHint"], name)
 
 

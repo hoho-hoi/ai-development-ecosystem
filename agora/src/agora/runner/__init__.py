@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..profiles import Profile
+from ..spec import Spec
 
 STREAM_LIMIT = 64 * 1024 * 1024  # ACP frames can carry whole files
 
@@ -53,7 +53,7 @@ class Runner(abc.ABC):
     async def start(
         self,
         session_id: str,
-        profile: Profile,
+        spec: Spec,
         bundle: Path,
         env: dict[str, str],
         stderr_path: Path,

@@ -37,6 +37,19 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.8.0（2026-11-15）：プロファイルを廃止し、起動条件をモジュールの plugin.json に
+
+ユーザーの方針と合意（要件図：https://claude.ai/artifact/13CcgZ1w9dByA7ZkvPsxUm）：
+
+- 「プロファイルは、モジュールに含める。plugin.json に書けばいい。agora は対象のセッションの起動条件については完全にモジュールを参考にする」「プロファイルという言葉は紛らわしいので、モジュールとその設定、つまり plugin.json で統一」。コード・文書から「プロファイル」を消した（`profiles.py` → `spec.py`、`list_profiles` → `list_modules`、`spawn` の `profile` → `module`、`agora profiles` → `agora modules`、DB の列 `module_id`）。
+- **起動条件**は `plugin.json` の `extensions["io.github.hoho-hoi.agora"]`：`runtimes`（`harness`・`version`・`model`・`env`・`login`）、`tools`、`builtinTools`、`sessionMode`、`limits`、`spawnableBy`、`instructions`。
+- **イメージ**（Q1）：モジュールはハーネスと版だけを書き、agora が `images/<harness>/Dockerfile` から `agora/<harness>:<版>` を作る（初回のみ）。使ったイメージの ID を `session.process` に記録。「agora 側にモジュール固有の文脈は入れない」（ユーザー）。
+- **起動条件の候補**（Q2）：`runtimes` を並べられ、この場所で使えるもの（参照する環境変数がそろっている）を上から選んで記録する。ただし「再現性が重要なので、運用ではモデルをあまり変えたくない」（ユーザー）ので、ふだんは1つにする。
+- **認証**（Q3）：モジュールの `env` に `"CLAUDE_CODE_OAUTH_TOKEN": "${AGORA_CLAUDE_OAUTH_TOKEN}"` のように、マシンの環境変数への参照だけを書く。値はモジュールにも argv にも履歴にも残らない。OAuth でもこの形が正解かはユーザーも自信がないとのこと（要観察）。
+- **権限**：「権限はフルでいい。人間に承認をもらうのではなく自動で動いてほしい。やってほしくないことは、そもそもツールや MCP から外す」（ユーザー）。`permissions` を廃止し、常に許可。ハーネス組み込みのツールは `builtinTools: false` で一括して止められる（Q4 は未回答のため、方針に合う一括切り替えにした）。
+- **場所の設定**（agora.yaml）に残したのは、その場所の事情だけ：`modules`（登録するモジュールと版）、`network`（プロキシ）、`harnesses`（既存イメージや ACP コマンドの差し替え）、`docker.build_args`・`build_network`。作業するリポジトリは `spawn` の `workspace` 引数。
+- Gemini と custom のハーネスはなくした（使われていなかった）。テスト 88 件が通る。
+
 ## 実モデルでの確認（2026-11-15、v0.7.1 + module_ref）
 
 OpenCode Zen の無料モデル（API キー不要）で、クラウド環境の Docker ランナーを使って確かめた。

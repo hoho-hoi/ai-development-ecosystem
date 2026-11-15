@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..profiles import Profile
+from ..spec import Spec
 from . import STREAM_LIMIT, RunHandle, Runner
 
 BRIDGE_FILE = Path(__file__).resolve().parent.parent / "bridge.py"
@@ -32,7 +32,7 @@ class LocalRunner(Runner):
     def runtime_paths(self, bundle: Path) -> tuple[str, str]:
         return str(bundle / "workspace"), str(bundle / "home" / ".agora")
 
-    async def start(self, session_id: str, profile: Profile, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
+    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
         workspace, agora = self.runtime_paths(bundle)
         home = bundle / "home"
         # The bundle's agora/ dir becomes $HOME/.agora, mirroring the container layout.
@@ -42,14 +42,12 @@ class LocalRunner(Runner):
         child_env = {k: os.environ[k] for k in PASSTHROUGH if k in os.environ}
         child_env.update({"HOME": str(home), "TMPDIR": str(bundle / "tmp")})
         (bundle / "tmp").mkdir(exist_ok=True)
-        for name in profile.runtime.secrets:
-            if name in os.environ:
-                child_env[name] = os.environ[name]
+        child_env.update(spec.runtime.secret_values())
         child_env.update(env)
         stderr = open(stderr_path, "ab")
         try:
             proc = await asyncio.create_subprocess_exec(
-                *profile.runtime.adapter,
+                *spec.runtime.adapter,
                 cwd=workspace,
                 env=child_env,
                 stdin=asyncio.subprocess.PIPE,
@@ -66,7 +64,8 @@ class LocalRunner(Runner):
             agora_path=agora,
             bridge_command=[sys.executable, str(BRIDGE_FILE)],
             broker_url=self.broker_url,
-            info={"runner": self.name, "pid": proc.pid, "bundle": str(bundle)},
+            info={"runner": self.name, "pid": proc.pid, "bundle": str(bundle),
+                  "harness": f"{spec.runtime.harness}@{spec.runtime.version} (local: {' '.join(spec.runtime.adapter)})"},
         )
 
     async def collect(self, handle: RunHandle, record_subdir: str, dest: Path) -> bool:

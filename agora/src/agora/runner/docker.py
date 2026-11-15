@@ -17,8 +17,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from ..profiles import Profile
+from ..spec import HARNESSES, Spec
 from . import STREAM_LIMIT, RunHandle, Runner
+
+# The agora project directory: images/<harness>/Dockerfile and src/ (build context).
+IMAGES_ROOT = Path(__file__).resolve().parents[3]
 
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_HB = "/home/agent/.agora"
@@ -34,9 +37,9 @@ class DockerError(RuntimeError):
     pass
 
 
-async def _run(*args: str, check: bool = True) -> tuple[int, str, str]:
+async def _run(*args: str, check: bool = True, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
     )
     out, err = await proc.communicate()
     if check and proc.returncode != 0:
@@ -65,22 +68,23 @@ def network_gateway(docker: str, network: str) -> str:
 def build_create_args(
     docker: str,
     session_id: str,
-    profile: Profile,
+    spec: Spec,
     env: dict[str, str],
     network: str,
     owner: str = "",
+    image: str | None = None,
 ) -> list[str]:
     """The full `docker create` argv. Secret values never appear here: they
     are passed as `-e NAME` and taken from the docker CLI's environment."""
     name = container_name(session_id)
-    lim = profile.limits
+    lim = spec.limits
     args = [
         docker, "create",
         "--name", name,
         "--interactive",
         "--init",
         "--label", f"agora.session={session_id}",
-        "--label", f"agora.profile={profile.id}@{profile.version}",
+        "--label", f"agora.module={spec.id}@{spec.version}",
         "--label", f"agora.owner={owner}",
         "--cap-drop", "ALL",
         *[a for cap in CAPS for a in ("--cap-add", cap)],
@@ -92,19 +96,19 @@ def build_create_args(
         args += ["--memory", lim.memory]
     if lim.cpus:
         args += ["--cpus", str(lim.cpus)]
-    if profile.network.mode == "none":
+    if spec.network.mode == "none":
         args += ["--network", "none"]
     else:
         args += ["--network", network, "--add-host", "host.docker.internal:host-gateway"]
-        if profile.network.proxy:
+        if spec.network.proxy:
             for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
-                args += ["--env", f"{key}={profile.network.proxy}"]
+                args += ["--env", f"{key}={spec.network.proxy}"]
             args += ["--env", "NO_PROXY=host.docker.internal", "--env", "no_proxy=host.docker.internal"]
     for key, value in sorted(env.items()):
         args += ["--env", f"{key}={value}"]
-    for secret in profile.runtime.secrets:
+    for secret in spec.runtime.secrets:
         args += ["--env", secret]
-    args += [profile.runtime.image, *profile.runtime.adapter]
+    args += [image or spec.runtime.image or "", *spec.runtime.adapter]
     return args
 
 
@@ -125,13 +129,45 @@ class DockerRunner(Runner):
         docker: str = "docker",
         keep_bundles: bool = False,
         owner: str = "",
+        build_args: dict[str, str] | None = None,
+        build_network: str | None = None,
+        images_dir: Path | None = None,
     ):
         self.broker_url = broker_url
         self.network = network
         self.docker = docker
         self.keep_bundles = keep_bundles
         self.owner = owner  # label value identifying this broker's containers
+        self.build_args = build_args or {}
+        self.build_network = build_network
+        self.images_dir = images_dir or IMAGES_ROOT
         self._network_ready = False
+        self._image_lock = asyncio.Lock()
+
+    async def ensure_image(self, spec: Spec) -> str:
+        """The image ID for the module's harness at its version: a prebuilt
+        image the place names (harnesses.<name>.image), else agora/<harness>:
+        <version>, built from images/<harness>/Dockerfile when missing."""
+        rt = spec.runtime
+        ref = rt.image or f"agora/{rt.harness}:{rt.version}"
+        async with self._image_lock:
+            code, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref, check=False)
+            if code == 0 and out:
+                return out
+            if rt.image:
+                raise DockerError(f"image {rt.image} for {rt.harness} is not present at this place")
+            dockerfile = self.images_dir / "images" / rt.harness / "Dockerfile"
+            if not dockerfile.is_file():
+                raise DockerError(f"no image definition for harness {rt.harness} ({dockerfile})")
+            args = [self.docker, "build", "-q", "-f", str(dockerfile), "-t", ref,
+                    "--build-arg", f"{HARNESSES[rt.harness]['version_arg']}={rt.version}"]
+            for k, v in sorted(self.build_args.items()):
+                args += ["--build-arg", f"{k}={v}"]
+            if self.build_network:
+                args += ["--network", self.build_network]
+            await _run(*args, str(self.images_dir))
+            _, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref)
+            return out
 
     async def cleanup_orphans(self) -> list[str]:
         """Remove containers this broker left behind (e.g. after a crash)."""
@@ -154,14 +190,16 @@ class DockerRunner(Runner):
             await _run(self.docker, "network", "create", "--driver", "bridge", self.network)
         self._network_ready = True
 
-    async def start(self, session_id: str, profile: Profile, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
-        if profile.network.mode != "none":
+    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
+        if spec.network.mode != "none":
             await self._ensure_network()
+        image = await self.ensure_image(spec)
         name = container_name(session_id)
         tar_path = bundle.with_suffix(".tar")
         await asyncio.to_thread(pack_bundle, bundle, tar_path)
-        args = build_create_args(self.docker, session_id, profile, env, self.network, self.owner)
-        await _run(*args)
+        args = build_create_args(self.docker, session_id, spec, env, self.network, self.owner, image)
+        # Secret values go only into the docker CLI's environment (`-e NAME`).
+        await _run(*args, env={**os.environ, **spec.runtime.secret_values()})
         try:
             await _run(self.docker, "cp", str(tar_path), f"{name}:{CONTAINER_BUNDLE}")
             stderr = open(stderr_path, "ab")
@@ -187,7 +225,8 @@ class DockerRunner(Runner):
             agora_path=CONTAINER_HB,
             bridge_command=list(CONTAINER_BRIDGE),
             broker_url=self.broker_url,
-            info={"runner": self.name, "container": name, "image": profile.runtime.image, "bundle": str(bundle)},
+            info={"runner": self.name, "container": name, "image": image,
+                  "harness": f"{spec.runtime.harness}@{spec.runtime.version}", "bundle": str(bundle)},
         )
 
     async def stop(self, handle: RunHandle, timeout: float = 10) -> None:

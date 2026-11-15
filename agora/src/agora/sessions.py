@@ -64,7 +64,7 @@ from .identity import OPERATOR, Key, message_bytes, session_id_for, split_addres
 from .jsonrpc import ConnectionClosed, RpcError
 from .logins import LoginError, load_chatgpt_login, write_access_only
 from .modules import ModuleCache
-from .profiles import BROKER_TOOLS, Profile, ProfileRegistry
+from .spec import BROKER_TOOLS, Catalog, Spec, Workspace
 from .runner import RunHandle, Runner
 from .store import HistoryStore, now
 from .workspace import prepare_workspace
@@ -113,7 +113,7 @@ class Session:
     token: str
     created_at: str
     parent_id: str | None = None  # address of whoever made it
-    profile: Profile | None = None
+    spec: Spec | None = None
     ended_at: str | None = None
     end_reason: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
@@ -145,8 +145,8 @@ class Session:
             "name": self.name,
             "kind": self.kind,
             "harness": self.harness,
-            "profile_id": self.profile.id if self.profile else None,
-            "profile_version": self.profile.version if self.profile else None,
+            "module_id": self.spec.id if self.spec else None,
+            "module_version": self.spec.version if self.spec else None,
             "state": self.state,
             "parent_id": self.parent_id,
             "depth": self.depth,
@@ -189,13 +189,13 @@ class SessionManager:
         self,
         cfg: BrokerConfig,
         store: HistoryStore,
-        profiles: ProfileRegistry,
+        catalog: Catalog,
         runner: Runner,
         federation: Federation,
     ):
         self.cfg = cfg
         self.store = store
-        self.profiles = profiles
+        self.catalog = catalog
         self.runner = runner
         self.fed = federation
         self.place = federation.name
@@ -243,7 +243,7 @@ class SessionManager:
             "name": s.name,
             "kind": s.kind,
             "harness": s.harness,
-            "profile": f"{s.profile.id}@{s.profile.version}" if s.profile else None,
+            "module": f"{s.spec.id}@{s.spec.version}" if s.spec else None,
             "state": s.state,
             "parent": s.parent_id,
             "cloned_from": s.meta.get("cloned_from"),
@@ -322,14 +322,14 @@ class SessionManager:
     # --- callers from other places ------------------------------------------------
     @staticmethod
     def role(caller: Session) -> str:
-        """What a caller counts as for spawnableBy: operator, external or a profile id."""
+        """What a caller counts as for spawnableBy: operator, external or a spec id."""
         if caller.kind == "operator":
             return "operator"
         if caller.kind == "remote":
             return str(caller.meta.get("role") or "")
         if caller.kind == "external":
             return "external"
-        return caller.profile.id if caller.profile else ""
+        return caller.spec.id if caller.spec else ""
 
     def caller_info(self, caller: Session) -> dict[str, Any]:
         return {
@@ -386,40 +386,40 @@ class SessionManager:
         return s
 
     # --- birth: spawn and clone ------------------------------------------------
-    def _check_spawn_policy(self, caller: Session, profile: Profile) -> None:
+    def _check_spawn_policy(self, caller: Session, spec: Spec) -> None:
         if caller.kind == "operator":
             return
-        allowed = profile.spawnable_by
+        allowed = spec.spawnable_by
         who = self.role(caller)
         if "*" not in allowed and who not in allowed:
-            raise Forbidden(f"{caller.name} ({who}) may not spawn profile {profile.id!r}; spawnableBy={allowed}")
+            raise Forbidden(f"{caller.name} ({who}) may not spawn spec {spec.id!r}; spawnableBy={allowed}")
         if caller.spawn_budget < 1:
             raise Forbidden(f"{caller.name} has no spawn depth left (depth {caller.depth})")
 
-    def _check_capacity(self, profile: Profile) -> None:
+    def _check_capacity(self, spec: Spec) -> None:
         live = [s for s in self.sessions.values() if s.kind == "managed" and s.live]
         if len(live) >= self.cfg.max_sessions:
             raise Forbidden(f"place limit reached: {self.cfg.max_sessions} live managed sessions")
-        same = [s for s in live if s.profile and s.profile.id == profile.id]
-        if len(same) >= profile.limits.max_concurrent:
-            raise Forbidden(f"profile {profile.id!r} limit reached: {profile.limits.max_concurrent} live sessions")
+        same = [s for s in live if s.spec and s.spec.id == spec.id]
+        if len(same) >= spec.limits.max_concurrent:
+            raise Forbidden(f"spec {spec.id!r} limit reached: {spec.limits.max_concurrent} live sessions")
 
-    async def _born(self, caller: Session, profile: Profile, name: str | None, meta: dict[str, Any]) -> Session:
+    async def _born(self, caller: Session, spec: Spec, name: str | None, meta: dict[str, Any]) -> Session:
         async with self._lock:
-            self._check_spawn_policy(caller, profile)
-            self._check_capacity(profile)
+            self._check_spawn_policy(caller, spec)
+            self._check_capacity(spec)
             return self._add(
                 self._new_person(
-                    name=self._unique_name(name or profile.id),
+                    name=self._unique_name(name or spec.id),
                     kind="managed",
-                    harness=profile.runtime.harness,
+                    harness=spec.runtime.harness,
                     state="preparing",
                     depth=caller.depth + 1,
-                    spawn_budget=min(caller.spawn_budget - 1, profile.limits.max_spawn_depth),
+                    spawn_budget=min(caller.spawn_budget - 1, spec.limits.max_spawn_depth),
                     parent_id=self.address(caller),
-                    profile=profile,
+                    spec=spec,
                     meta=meta,
-                    tools=frozenset(profile.runtime.broker_tools),
+                    tools=frozenset(spec.runtime.broker_tools),
                 )
             )
 
@@ -433,9 +433,9 @@ class SessionManager:
     async def spawn(
         self,
         caller: Session,
-        profile_id: str,
+        module: str,
         task: str | None = None,
-        ref: str | None = None,
+        workspace: dict[str, Any] | None = None,
         name: str | None = None,
         wait: bool = True,
         wait_timeout: float = 600,
@@ -444,8 +444,8 @@ class SessionManager:
     ) -> dict[str, Any]:
         if place and place != self.place:
             # Born elsewhere; the task is then an ordinary signed message from the caller.
-            args = {"profile": profile_id, "ref": ref, "name": name, "wait": wait, "wait_timeout": wait_timeout,
-                    "module_ref": module_ref}
+            args = {"module": module, "workspace": workspace, "name": name, "wait": wait,
+                    "wait_timeout": wait_timeout, "module_ref": module_ref}
             st = await self.forward(caller, place, "spawn", {k: v for k, v in args.items() if v is not None},
                                     timeout=wait_timeout + 60)
             task_message_id = None
@@ -453,28 +453,28 @@ class SessionManager:
                 task_message_id = (await self.send(caller, st["address"], task))["message_id"]
             return {**st, "task_message_id": task_message_id}
         try:
-            profile = self.profiles.get(profile_id)
+            ws = Workspace.model_validate(workspace or {})
+        except Exception as e:
+            raise BrokerError(f"bad workspace: {e}") from None
+        try:
+            spec = await asyncio.to_thread(self.catalog.get, module, module_ref=module_ref, workspace=ws)
         except KeyError as e:
             raise NotFound(str(e)) from None
-        if module_ref:
-            try:
-                profile = profile.with_module_ref(module_ref, self.profiles.cache)
-            except ValueError as e:
-                raise BrokerError(str(e)) from None
-        s = await self._born(caller, profile, name, {"ref": ref or profile.workspace.ref})
+        except ValueError as e:  # SpecError, ModuleError
+            raise BrokerError(str(e)) from None
+        s = await self._born(caller, spec, name, {"ref": ws.ref})
         self.store.record(
             "session.spawn",
             session_id=s.id,
             caller=self.address(caller),
-            profile=profile.resolved_dump(),
-            fingerprint=profile.fingerprint,
+            spec=spec.resolved_dump(),
+            fingerprint=spec.fingerprint,
             task=task,
-            ref_override=ref,
             module_ref_override=module_ref,
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )
-        s.tasks.append(asyncio.create_task(self._launch(s, ref)))
+        s.tasks.append(asyncio.create_task(self._launch(s)))
         task_message_id = None
         if task:
             task_message_id = (await self.send(caller, s.id, task))["message_id"]
@@ -488,11 +488,11 @@ class SessionManager:
         is now and its harness's conversation records, resumed in a new body
         (ACP session/load). New key, address and mailbox."""
         src = self.resolve(ref)
-        if src.kind != "managed" or not src.profile or not src.handle:
+        if src.kind != "managed" or not src.spec or not src.handle:
             raise BrokerError(f"{src.name} has no body to clone (state {src.state})")
-        profile = src.profile
+        spec = src.spec
         s = await self._born(
-            caller, profile, name or f"{src.name}-clone",
+            caller, spec, name or f"{src.name}-clone",
             {"ref": src.meta.get("ref"), "cloned_from": self.address(src)},
         )
         bundle = self.cfg.state_dir / "bundles" / s.id
@@ -500,15 +500,15 @@ class SessionManager:
         try:
             bundle.mkdir(parents=True)
             await self.runner.snapshot_workspace(src.handle, bundle / "workspace")
-            await self.runner.collect(src.handle, harness_record_dir(profile), seed)
-            for cred in CREDENTIAL_FILES.get(profile.runtime.harness, ()):
+            await self.runner.collect(src.handle, harness_record_dir(spec), seed)
+            for cred in CREDENTIAL_FILES.get(spec.runtime.harness, ()):
                 for f in seed.rglob(cred) if seed.exists() else ():
                     f.unlink()
         except Exception as e:
             self.store.record("session.error", session_id=s.id, stage="clone", error=repr(e))
             await self._finalize(s, "failed", f"clone failed: {e}")
             return self.status(s.id)
-        load = src.acp_session_id if profile.runtime.session_mode == "persistent" else None
+        load = src.acp_session_id if spec.runtime.session_mode == "persistent" else None
         self.store.record(
             "session.clone",
             session_id=s.id,
@@ -516,34 +516,35 @@ class SessionManager:
             source=self.address(src),
             source_state=src.state,
             source_conversation=src.acp_session_id,
-            fingerprint=profile.fingerprint,
+            fingerprint=spec.fingerprint,
             public_key=s.key.public_hex if s.key else None,
         )
-        s.tasks.append(asyncio.create_task(self._launch(s, None, seed=seed, load=load)))
+        s.tasks.append(asyncio.create_task(self._launch(s, seed=seed, load=load)))
         await self._wait_ready(s, wait, wait_timeout)
         return self.status(s.id)
 
-    async def _launch(self, s: Session, ref: str | None, seed: Path | None = None, load: str | None = None) -> None:
+    async def _launch(self, s: Session, seed: Path | None = None, load: str | None = None) -> None:
         """Make the body: workspace, harness config, container, ACP. A clone
         brings its workspace already in the bundle and its harness records in
         `seed`, and resumes the conversation `load`."""
-        assert s.profile is not None
-        profile = s.profile
+        assert s.spec is not None
+        spec = s.spec
         bundle = self.cfg.state_dir / "bundles" / s.id
         stderr_path = self.cfg.history_dir / "sessions" / s.id / "agent.stderr.log"
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             if seed is None:
                 bundle.mkdir(parents=True)
-                manifest = await asyncio.to_thread(prepare_workspace, profile, bundle / "workspace", ref)
+                manifest = await asyncio.to_thread(prepare_workspace, spec.workspace, bundle / "workspace")
                 self.store.record("session.workspace", session_id=s.id, **manifest)
             else:
                 self.store.record("session.workspace", session_id=s.id, cloned_from=s.meta.get("cloned_from"))
             ws_path, agora_path = self.runner.runtime_paths(bundle)
             (bundle / "agora").mkdir()
-            definition = await asyncio.to_thread(resolve_definition, profile, self.modules)
+            definition = resolve_definition(spec)
             module_mcp: list[dict[str, Any]] = []
             if definition.module:
+                assert definition.manifest is not None
                 self.store.record("session.module", session_id=s.id, **definition.manifest)
                 # The whole module goes into the session, so its MCP servers can run from it.
                 await asyncio.to_thread(
@@ -551,32 +552,31 @@ class SessionManager:
                 )
                 module_mcp = definition.module.mcp_servers(f"{agora_path}/module")
             env = prepare_harness_config(
-                profile, bundle / "agora", agora_path, definition.instructions, definition.skill_dirs
+                spec, bundle / "agora", agora_path, definition.instructions, definition.skill_dirs
             )
             if seed is not None and seed.exists():
                 # The source's records, but this body's own config (instructions, settings, skills).
-                target = bundle / "agora" / harness_record_dir(profile)
+                target = bundle / "agora" / harness_record_dir(spec)
                 fresh = set(os.listdir(target))
                 shutil.copytree(
                     seed, target, dirs_exist_ok=True, symlinks=True,
                     ignore=lambda d, names: [n for n in names if Path(d) == seed and n in fresh],
                 )
                 shutil.rmtree(seed, ignore_errors=True)
-            if profile.runtime.login == "chatgpt":
+            if spec.runtime.login == "chatgpt":
                 login = load_chatgpt_login(self.cfg.codex_login_path)
-                login.check_fresh(profile.limits.max_runtime_minutes * 60)
+                login.check_fresh(spec.limits.max_runtime_minutes * 60)
                 for name, value in login.secrets.items():
                     self.store.add_secret(name, value)
                 write_access_only(login, bundle / "agora" / "codex")
                 self.store.record("session.login", session_id=s.id, **login.summary())
-            self.store.record("session.harness_env", session_id=s.id, env=env, secrets=profile.runtime.secrets)
-            for name in profile.runtime.secrets:
-                if name in os.environ:
-                    self.store.add_secret(name, os.environ[name])
+            self.store.record("session.harness_env", session_id=s.id, env=env, secrets=spec.runtime.secret_env)
+            for name, value in spec.runtime.secret_values().items():
+                self.store.add_secret(name, value)
             if s.state != "preparing":  # terminated while preparing
                 return
             self._set_state(s, "starting")
-            s.handle = await self.runner.start(s.id, profile, bundle, env, stderr_path)
+            s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path)
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
 
@@ -594,14 +594,14 @@ class SessionManager:
             s.acp = AcpClient(
                 s.handle.reader,
                 s.handle.writer,
-                permissions=profile.runtime.permissions,
+                permissions=spec.runtime.permissions,
                 tap=tap,
                 on_update=on_update,
                 on_permission=on_permission,
             )
             await s.acp.initialize()
             mcp_servers: list[dict[str, Any]] = []
-            tools = profile.runtime.broker_tools
+            tools = spec.runtime.broker_tools
             if tools:
                 bridge_env = [
                     {"name": "AGORA_BROKER_URL", "value": s.handle.broker_url},
@@ -617,19 +617,10 @@ class SessionManager:
                         "env": bridge_env,
                     }
                 )
-            mcp_servers += [
-                {
-                    "name": m.name,
-                    "command": m.command,
-                    "args": m.args,
-                    "env": [{"name": k, "value": v} for k, v in m.env.items()],
-                }
-                for m in profile.runtime.mcp_servers
-            ]
             names = [m["name"] for m in mcp_servers]
             clash = sorted({m["name"] for m in module_mcp} & set(names))
             if clash:
-                raise BrokerError(f"the module's MCP servers clash with the profile's: {', '.join(clash)}")
+                raise BrokerError(f"the module's MCP servers clash with agora's: {', '.join(clash)}")
             mcp_servers += module_mcp
             s.mcp_servers = mcp_servers
             if load:
@@ -639,7 +630,7 @@ class SessionManager:
                 s.acp_session_id = load
             else:
                 s.acp_session_id, choice = await s.acp.new_session(
-                    s.handle.workspace_path, mcp_servers, model=profile.runtime.model
+                    s.handle.workspace_path, mcp_servers, model=spec.runtime.model
                 )
                 if choice:
                     self.store.record("session.model", session_id=s.id, **choice)
@@ -647,7 +638,7 @@ class SessionManager:
                 return
             self._set_state(s, "idle", acp_session_id=s.acp_session_id)
             s.tasks.append(asyncio.create_task(self._worker(s)))
-            s.tasks.append(asyncio.create_task(self._deadline(s, profile.limits.max_runtime_minutes * 60)))
+            s.tasks.append(asyncio.create_task(self._deadline(s, spec.limits.max_runtime_minutes * 60)))
         except (LoginError, BrokerError) as e:  # a condition to fix, not a bug
             log.warning("launch of %s refused: %s", s.id, e)
             stage = "login" if isinstance(e, LoginError) else "launch"
@@ -669,8 +660,8 @@ class SessionManager:
                 await s.acp.peer.request("session/close", {"sessionId": old}, timeout=10)
             except Exception as e:
                 self.store.record("session.error", session_id=s.id, stage="session_close", error=repr(e))
-        assert s.profile is not None
-        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=s.profile.runtime.model)
+        assert s.spec is not None
+        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=s.spec.runtime.model)
         self.store.record("session.conversation", session_id=s.id, acp_session_id=s.acp_session_id, previous=old)
 
     async def _watch_process(self, s: Session) -> None:
@@ -695,14 +686,14 @@ class SessionManager:
                     return
 
     async def _turn(self, s: Session, msg: dict[str, Any]) -> bool:
-        assert s.acp is not None and s.acp_session_id is not None and s.profile is not None
+        assert s.acp is not None and s.acp_session_id is not None and s.spec is not None
         text = format_injection(msg)
         self._set_state(s, "busy", message_id=msg["id"])
         self.store.record(
             "message.inject", session_id=s.id, thread_id=msg["thread_id"], message_id=msg["id"], via="turn", text=text
         )
         try:
-            if s.profile.runtime.session_mode == "per_message" and s.turns > 0:
+            if s.spec.runtime.session_mode == "per_message" and s.turns > 0:
                 await self._fresh_conversation(s)
             s.turns += 1
             stop_reason, agent_text = await s.acp.prompt(s.acp_session_id, text)
@@ -1000,14 +991,14 @@ class SessionManager:
         }
 
     # --- queries ------------------------------------------------------------
-    def list_sessions(self, profile: str | None = None, state: str | None = None, include_ended: bool = False) -> list[dict[str, Any]]:
+    def list_sessions(self, module: str | None = None, state: str | None = None, include_ended: bool = False) -> list[dict[str, Any]]:
         out = []
         for s in self.sessions.values():
             if s.kind == "operator":
                 continue
             if not include_ended and not s.live:
                 continue
-            if profile and (not s.profile or s.profile.id != profile):
+            if module and (not s.spec or s.spec.id != module):
                 continue
             if state and s.state != state:
                 continue
@@ -1023,7 +1014,7 @@ class SessionManager:
                 "usage": s.usage,
                 "unread": len(self.store.unread(s.id)),
                 "acp_session_id": s.acp_session_id,
-                "fingerprint": s.profile.fingerprint if s.profile else None,
+                "fingerprint": s.spec.fingerprint if s.spec else None,
                 "public_key": s.key.public_hex if s.key else None,
             }
         )
@@ -1099,15 +1090,15 @@ class SessionManager:
                     pass
             if s.handle:
                 await self.runner.stop(s.handle)
-                assert s.profile is not None
+                assert s.spec is not None
                 dest = self.cfg.history_dir / "sessions" / s.id / "harness"
-                ok = await self.runner.collect(s.handle, harness_record_dir(s.profile), dest)
-                for name in CREDENTIAL_FILES.get(s.profile.runtime.harness, ()):
+                ok = await self.runner.collect(s.handle, harness_record_dir(s.spec), dest)
+                for name in CREDENTIAL_FILES.get(s.spec.runtime.harness, ()):
                     for f in dest.rglob(name) if dest.exists() else ():
                         f.unlink()  # credentials never go into the history
                 self.store.record("session.harness_records", session_id=s.id, collected=ok, path=str(dest))
                 await self.runner.destroy(s.handle)
-            elif s.profile is not None and not self.cfg.keep_bundles:
+            elif s.spec is not None and not self.cfg.keep_bundles:
                 shutil.rmtree(self.cfg.state_dir / "bundles" / s.id, ignore_errors=True)
             if s.acp:
                 await s.acp.close()

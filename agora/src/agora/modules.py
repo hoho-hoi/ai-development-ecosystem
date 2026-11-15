@@ -1,4 +1,4 @@
-"""Modules: harness-independent agent definitions that profiles bind to a runtime.
+"""Modules: everything agora needs to start one kind of agent.
 
 A module is an Agent Plugins (v1.0.0) package: a directory with a root
 plugin.json. agora reads the portable parts as the spec defines them and keeps
@@ -11,8 +11,8 @@ what the spec does not cover in its own extension namespace (NAMESPACE):
     ├── mcp.json               optional MCP servers {"$schema": ..., "mcpServers": {...}}
     └── <NAMESPACE>/AGENTS.md  the agent's instructions (default; see AgoraExtension)
 
-The module says what the agent is. The profile says how it runs (harness,
-model, image, permissions). A profile points at a module either pinned in a
+The module says what the agent is and how its sessions run (see spec.py for
+the runtime part). agora.yaml registers a module either pinned in a
 git repository (repo + full commit SHA) or, for development, in a local
 directory.
 """
@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 PLUGIN_FILE = "plugin.json"
 MCP_FILE = "mcp.json"
@@ -54,16 +54,80 @@ class _Closed(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+BROKER_TOOL_NAMES = ("send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history")
+
+
+class RuntimeOption(_Closed):
+    """One way to run the module: a harness at a version, a model, and the
+    environment the session gets. An env value is a literal, or exactly one
+    ${VAR} naming a variable of the machine agora runs on (credentials: the
+    value never enters the module, argv or history)."""
+
+    harness: str
+    version: str
+    model: str
+    env: dict[str, str] = Field(default_factory=dict)
+    login: Literal["chatgpt"] | None = None  # Codex on agora's ChatGPT plan login
+
+    @field_validator("env")
+    @classmethod
+    def _env_names(cls, v: dict[str, str]) -> dict[str, str]:
+        for name in v:
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+                raise ValueError(f"env name {name!r} must be an environment variable name")
+        return v
+
+    @model_validator(mode="after")
+    def _login(self) -> "RuntimeOption":
+        if self.login == "chatgpt" and self.harness != "codex":
+            raise ValueError("login: chatgpt needs harness: codex")
+        return self
+
+
+class ModuleLimits(_Closed):
+    max_runtime_minutes: int = Field(default=60, alias="maxRuntimeMinutes", ge=1)
+    max_spawn_depth: int = Field(default=1, alias="maxSpawnDepth", ge=0)
+    max_concurrent: int = Field(default=4, alias="maxConcurrent", ge=1)
+
+
 class AgoraExtension(_Closed):
-    """plugin.json's extensions[NAMESPACE]. Paths are relative to the
-    NAMESPACE directory."""
+    """plugin.json's extensions[NAMESPACE]: everything about how the module's
+    sessions run. Paths are relative to the NAMESPACE directory."""
 
     instructions: str | None = None
+    # Candidate runtimes, in order of preference; the first one this place
+    # can run is used (and recorded). Keep one for reproducibility.
+    runtimes: list[RuntimeOption] = Field(default_factory=list)
+    # agora tools the session gets: true (all), false (none) or a list.
+    tools: list[str] = Field(default_factory=lambda: list(BROKER_TOOL_NAMES))
+    # The harness's own tools (shell, files, web...). Permissions are otherwise
+    # always granted: what an agent must not do is kept out of its tools.
+    builtin_tools: bool = Field(default=True, alias="builtinTools")
+    # persistent: one conversation; per_message: a fresh one per message.
+    session_mode: Literal["persistent", "per_message"] = Field(default="persistent", alias="sessionMode")
+    limits: ModuleLimits = Field(default_factory=ModuleLimits)
+    # Who may start it: "external" (operator, external sessions), "*" (any
+    # session) or module names.
+    spawnable_by: list[str] = Field(default_factory=lambda: ["external", "*"], alias="spawnableBy")
 
     @field_validator("instructions")
     @classmethod
     def _relative(cls, v: str | None) -> str | None:
         return check_relative(v, "instructions") if v is not None else v
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _tools(cls, v: Any) -> Any:
+        if v is True or v is None:
+            return list(BROKER_TOOL_NAMES)
+        if v is False:
+            return []
+        if isinstance(v, list):
+            unknown = [t for t in v if t not in BROKER_TOOL_NAMES]
+            if unknown:
+                raise ValueError(f"unknown agora tool(s) {unknown}; known: {list(BROKER_TOOL_NAMES)}")
+            return list(dict.fromkeys(v))
+        raise ValueError("tools must be true, false or a list of tool names")
 
 
 class PluginManifest(_Closed):
@@ -344,7 +408,7 @@ class ModuleCache:
         return dest
 
     def resolve(self, ref_spec: Any, base: Path | None) -> ResolvedModule:
-        """ref_spec is a profiles.ModuleRef."""
+        """ref_spec is a spec.ModuleSource."""
         if ref_spec.repo:
             root = self.fetch(ref_spec.repo, ref_spec.ref)
             source = {"repo": ref_spec.repo, "ref": ref_spec.ref, "path": ref_spec.path}

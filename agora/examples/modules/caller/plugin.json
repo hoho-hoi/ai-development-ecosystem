@@ -1,6 +1,34 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "caller",
-  "version": "1.0.0",
-  "description": "受け取った依頼を、自分では処理せず、登録済みのプロファイルの中から合うものを選んで別のセッションとして起動し、その返事をそのまま依頼者へ返す。agora の動作確認用の見本。"
+  "version": "1.1.0",
+  "description": "受け取った依頼を、自分では処理せず、登録済みのモジュールの中から合うものを選んで別のセッションとして起動し、その返事をそのまま依頼者へ返す。agora の動作確認用の見本。",
+  "extensions": {
+    "io.github.hoho-hoi.agora": {
+      "runtimes": [
+        {
+          "harness": "opencode",
+          "version": "2.3.0",
+          "model": "opencode/deepseek-v4.1-flash-free"
+        }
+      ],
+      "tools": [
+        "list_modules",
+        "spawn",
+        "receive",
+        "send",
+        "terminate"
+      ],
+      "builtinTools": false,
+      "sessionMode": "per_message",
+      "limits": {
+        "maxRuntimeMinutes": 20,
+        "maxSpawnDepth": 1,
+        "maxConcurrent": 2
+      },
+      "spawnableBy": [
+        "external"
+      ]
+    }
+  }
 }

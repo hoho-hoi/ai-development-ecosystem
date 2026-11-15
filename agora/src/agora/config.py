@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .identity import PLACE_NAME_RE
+from .spec import HarnessOverride, ModuleSource, Network
 
 DEFAULT_STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "agora"
 
@@ -19,6 +20,10 @@ class DockerSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     binary: str = "docker"
     network: str = "agora-net"
+    # Building harness images (images/<harness>/Dockerfile): extra build
+    # arguments (e.g. BASE_IMAGE) and the network to build on.
+    build_args: dict[str, str] = Field(default_factory=dict)
+    build_network: str | None = None
 
 
 class PeerSettings(BaseModel):
@@ -66,7 +71,12 @@ class BrokerConfig(BaseModel):
     # must then be reachable from them, e.g. 0.0.0.0 or a VPN address.
     public_url: str | None = None
     state_dir: Path = DEFAULT_STATE_DIR
-    profiles_dir: Path = Path("profiles")
+    # The modules that can be started here; their plugin.json says how they run.
+    modules: list[ModuleSource] = Field(default_factory=list)
+    # How containers reach the outside (e.g. an HTTP proxy), for every session.
+    network: Network = Field(default_factory=Network)
+    # Per harness: a prebuilt image to use, or the ACP command (local runner).
+    harnesses: dict[str, HarnessOverride] = Field(default_factory=dict)
     listen_host: str = "127.0.0.1"
     listen_port: int = 8765
     runner: Literal["docker", "local"] = "docker"
@@ -82,8 +92,11 @@ class BrokerConfig(BaseModel):
     max_spawn_depth: int = 2
     keep_bundles: bool = False
     # The broker's own Codex login (a CODEX_HOME holding auth.json), used by
-    # profiles with runtime.login: chatgpt. Default: <state_dir>/codex-login.
+    # runtimes with login: chatgpt. Default: <state_dir>/codex-login.
     codex_login_dir: Path | None = None
+
+    # Directory that relative paths (local modules) are resolved against.
+    base_dir: Path = Field(default_factory=Path.cwd, exclude=True)
 
     @field_validator("place")
     @classmethod
@@ -126,8 +139,7 @@ def load_config(path: str | Path | None) -> BrokerConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     cfg = BrokerConfig.model_validate(data)
     # Relative paths in the config are relative to the config file.
-    if not cfg.profiles_dir.is_absolute():
-        cfg.profiles_dir = (path.parent / cfg.profiles_dir).resolve()
+    cfg.base_dir = path.parent.resolve()
     if not cfg.state_dir.is_absolute():
         cfg.state_dir = (path.parent / cfg.state_dir).resolve()
     if cfg.codex_login_dir is not None:

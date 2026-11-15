@@ -34,7 +34,7 @@ from .config import BrokerConfig, ensure_broker_key
 from .federation import Federation, Peer
 from .identity import load_or_create_key
 from .modules import ModuleCache
-from .profiles import BROKER_TOOLS, ProfileRegistry
+from .spec import BROKER_TOOLS, Catalog
 from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
@@ -46,27 +46,27 @@ log = logging.getLogger(__name__)
 # tool name → (allowed argument names, required argument names)
 TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
-    "list_profiles": ({"place"}, set()),
-    "spawn": ({"profile", "task", "ref", "module_ref", "name", "wait", "wait_timeout", "place"}, {"profile"}),
+    "list_modules": ({"place"}, set()),
+    "spawn": ({"module", "task", "workspace", "module_ref", "name", "wait", "wait_timeout", "place"}, {"module"}),
     "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
     "send": ({"to", "body", "thread_id", "reply_to"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
-    "list_sessions": ({"profile", "state", "include_ended", "place"}, set()),
+    "list_sessions": ({"module", "state", "include_ended", "place"}, set()),
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
     "history": ({"session", "thread_id", "since", "until", "kinds", "after_seq", "limit", "wait"}, set()),
 }
 # Tools another place may call on behalf of one of its residents. send arrives
 # as /federation/deliver, and a mailbox is read only where it is kept.
-REMOTE_TOOLS = {"list_profiles", "spawn", "clone", "list_sessions", "status", "terminate", "history"}
+REMOTE_TOOLS = {"list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history"}
 
 
-assert set(BROKER_TOOLS) | {"whoami"} == set(TOOLS), "profiles.BROKER_TOOLS and daemon.TOOLS disagree"
+assert set(BROKER_TOOLS) | {"whoami"} == set(TOOLS), "spec.BROKER_TOOLS and daemon.TOOLS disagree"
 
 
 def target_place(manager: SessionManager, tool: str, args: dict[str, Any]) -> str | None:
     """The other place a tool call is about, or None for here."""
-    if tool in ("list_profiles", "list_sessions", "spawn"):
+    if tool in ("list_modules", "list_sessions", "spawn"):
         place = args.get("place")
         return place if place and place != manager.place else None
     if tool in ("status", "terminate", "clone", "history") and args.get("session") not in (None, "", "self"):
@@ -85,6 +85,8 @@ def make_runner(cfg: BrokerConfig) -> Runner:
         docker=cfg.docker.binary,
         keep_bundles=cfg.keep_bundles,
         owner=hashlib.sha256(str(cfg.state_dir.resolve()).encode()).hexdigest()[:16],
+        build_args=cfg.docker.build_args,
+        build_network=cfg.docker.build_network,
     )
 
 
@@ -118,7 +120,8 @@ class Broker:
         self.cfg = cfg
         self.key = ensure_broker_key(cfg)
         self.store = HistoryStore(cfg.history_dir)
-        self.profiles = ProfileRegistry(cfg.profiles_dir, ModuleCache(cfg.state_dir / "modules"))
+        self.catalog = Catalog(cfg.modules, ModuleCache(cfg.state_dir / "modules"), cfg.base_dir,
+                               network=cfg.network, harnesses=cfg.harnesses)
         stale = self.store.mark_stale_sessions(LIVE)
         if stale:
             self.store.record("broker.stale_sessions", sessions=stale)
@@ -127,7 +130,7 @@ class Broker:
             load_or_create_key(cfg.place_key_file),
             [Peer(p.name, p.url, p.public_key) for p in cfg.peers],
         )
-        self.manager = SessionManager(cfg, self.store, self.profiles, runner or make_runner(cfg), self.federation)
+        self.manager = SessionManager(cfg, self.store, self.catalog, runner or make_runner(cfg), self.federation)
 
     def _bearer(self, request: Request) -> str:
         auth = request.headers.get("authorization", "")
@@ -161,27 +164,27 @@ class Broker:
             wait = float(args.get("wait_timeout", 600)) if tool in ("spawn", "clone") else float(args.get("wait") or 0)
             if tool == "spawn":  # the task goes as an ordinary signed message from the caller
                 return await m.spawn(
-                    caller, args["profile"], task=args.get("task"), ref=args.get("ref"), name=args.get("name"),
-                    wait=bool(args.get("wait", True)), wait_timeout=wait, place=place,
+                    caller, args["module"], task=args.get("task"), workspace=args.get("workspace"),
+                    name=args.get("name"), wait=bool(args.get("wait", True)), wait_timeout=wait, place=place,
                     module_ref=args.get("module_ref"),
                 )
             return await m.forward(caller, place, tool, args, timeout=wait + 120)
         if tool == "whoami":
             return {**m.summary(caller), "public_key": caller.key.public_hex if caller.key else None}
-        if tool == "list_profiles":
-            fetch_errors = await asyncio.to_thread(self.profiles.prefetch)
+        if tool == "list_modules":
+            cards, errors = await asyncio.to_thread(self.catalog.cards)
             return {
                 "place": m.place,
-                "places": sorted(self.federation.peers),  # where else profiles can be listed and spawned
-                "profiles": [p.agent_card() for p in self.profiles.list()],
-                "errors": {**self.profiles.errors(), **fetch_errors},
+                "places": sorted(self.federation.peers),  # where else modules can be listed and spawned
+                "modules": cards,
+                "errors": errors,
             }
         if tool == "spawn":
             return await m.spawn(
                 caller,
-                args["profile"],
+                args["module"],
                 task=args.get("task"),
-                ref=args.get("ref"),
+                workspace=args.get("workspace"),
                 name=args.get("name"),
                 wait=bool(args.get("wait", True)),
                 wait_timeout=float(args.get("wait_timeout", 600)),
@@ -212,7 +215,7 @@ class Broker:
             return {
                 "place": m.place,
                 "sessions": m.list_sessions(
-                    profile=args.get("profile"), state=args.get("state"), include_ended=bool(args.get("include_ended"))
+                    module=args.get("module"), state=args.get("state"), include_ended=bool(args.get("include_ended"))
                 ),
             }
         if tool == "status":

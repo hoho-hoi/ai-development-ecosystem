@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     name TEXT NOT NULL,
     kind TEXT NOT NULL,
     harness TEXT,
-    profile_id TEXT,
-    profile_version TEXT,
+    module_id TEXT,
+    module_version TEXT,
     state TEXT NOT NULL,
     parent_id TEXT,
     depth INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +94,11 @@ class HistoryStore:
         for col in ("from_name", "sig"):
             if col not in have:
                 self.db.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
+        # v0.8: sessions run modules (the old columns stay unused in old indexes).
+        have = {r["name"] for r in self.db.execute("PRAGMA table_info(sessions)")}
+        for col in ("module_id", "module_version"):
+            if col not in have:
+                self.db.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
 
     # --- redaction -------------------------------------------------------
     def add_secret(self, name: str, value: str) -> None:

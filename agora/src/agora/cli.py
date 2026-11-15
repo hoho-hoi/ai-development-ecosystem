@@ -3,7 +3,7 @@
     agora daemon   [--config agora.yaml]           run this machine's place
     agora place    [--config agora.yaml]           show this place's name and key, as a peer entry for other places
     agora mcp      [bridge options]             run the stdio MCP bridge (for a harness's MCP config)
-    agora profiles [--config agora.yaml] [FILE…]   validate profiles and show their fingerprints
+    agora modules  [--config agora.yaml] [DIR…]    validate modules and show their runtime and fingerprint
     agora call TOOL [JSON] [--config agora.yaml]   call a broker tool as the operator
     agora codex-login [--status] [--device-auth] [--config agora.yaml]
                                              log the broker in to a ChatGPT plan (Codex)
@@ -32,25 +32,41 @@ def _cmd_daemon(a: argparse.Namespace) -> None:
     asyncio.run(serve(load_config(a.config)))
 
 
-def _cmd_profiles(a: argparse.Namespace) -> None:
-    from .profiles import ProfileRegistry, load_profile
+def _cmd_modules(a: argparse.Namespace) -> None:
+    """Validate modules: the given module directories, or those registered in
+    the config. Shows each module's runtime at this place and its fingerprint."""
+    from .modules import ModuleCache
+    from .spec import Catalog, ModuleSource, SpecError, load_module_dir, resolve
 
     ok = True
-    if a.files:
-        for f in a.files:
+    if a.dirs:
+        for d in a.dirs:
             try:
-                p = load_profile(f)
-                print(f"OK    {f}: {p.id}@{p.version} {p.fingerprint}")
+                mod = load_module_dir(d)
+                try:
+                    spec = resolve(mod, ModuleSource(local=str(Path(d).resolve())))
+                    rt = spec.runtime
+                    print(f"OK    {d}: {spec.id}@{spec.version} {rt.harness}@{rt.version} {rt.model} {spec.fingerprint}")
+                except SpecError as e:
+                    print(f"OK    {d}: {mod.plugin.name} (cannot run here: {e})")
             except Exception as e:
                 ok = False
-                print(f"ERROR {f}: {e}")
+                print(f"ERROR {d}: {e}")
     else:
-        reg = ProfileRegistry(load_config(a.config).profiles_dir)
-        for p in reg.list():
-            print(f"OK    {p.id}@{p.version} {p.fingerprint}")
-        for name, err in reg.errors().items():
+        cfg = load_config(a.config)
+        cat = Catalog(cfg.modules, ModuleCache(cfg.state_dir / "modules"), cfg.base_dir,
+                      network=cfg.network, harnesses=cfg.harnesses)
+        for name in cat.names():
+            try:
+                spec = cat.get(name)
+                rt = spec.runtime
+                print(f"OK    {name}@{spec.version} {rt.harness}@{rt.version} {rt.model} {spec.fingerprint}")
+            except Exception as e:
+                ok = False
+                print(f"ERROR {name}: {e}")
+        for key, err in cat.errors().items():
             ok = False
-            print(f"ERROR {name}: {err}")
+            print(f"ERROR {key}: {err}")
     sys.exit(0 if ok else 1)
 
 
@@ -141,10 +157,10 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("place", help="show this place's name and key (a peer entry for other places)")
     p.add_argument("--config", type=Path)
     p.set_defaults(fn=_cmd_place)
-    p = sub.add_parser("profiles", help="validate profiles")
+    p = sub.add_parser("modules", help="validate modules (registered ones, or the given directories)")
     p.add_argument("--config", type=Path)
-    p.add_argument("files", nargs="*")
-    p.set_defaults(fn=_cmd_profiles)
+    p.add_argument("dirs", nargs="*")
+    p.set_defaults(fn=_cmd_modules)
     p = sub.add_parser("call", help="call a tool as the operator")
     p.add_argument("tool")
     p.add_argument("json", nargs="?")
