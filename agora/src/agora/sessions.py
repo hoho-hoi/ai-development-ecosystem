@@ -45,6 +45,7 @@ import os
 import re
 import secrets
 import shutil
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -603,6 +604,9 @@ class SessionManager:
                 self.store.add_secret("llm_key", s.llm_key)
                 env[url_var] = self.gateway.session_url
                 extra_secrets[key_var] = s.llm_key
+                if spec.network.proxy:  # the gateway is reached directly, not through the proxy
+                    host = urllib.parse.urlsplit(self.gateway.session_url).hostname or ""
+                    env["NO_PROXY"] = env["no_proxy"] = f"host.docker.internal,{host}"
                 self.store.record("session.llm_key", session_id=s.id, gateway=self.gateway.session_url, metadata=meta)
             s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path, secrets=extra_secrets)
             self.store.record("session.process", session_id=s.id, **s.handle.info)

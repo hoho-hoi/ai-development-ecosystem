@@ -208,6 +208,7 @@ def handle_prompt(rid, params):
                 "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
                 "anthropic_base_url": os.environ.get("ANTHROPIC_BASE_URL"),
                 "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY"),
+                "no_proxy": os.environ.get("NO_PROXY"),
                 "config_files": sorted(
                     str(p.relative_to(os.environ["CLAUDE_CONFIG_DIR"]))
                     for p in Path(os.environ.get("CLAUDE_CONFIG_DIR", "/nonexistent")).rglob("*")

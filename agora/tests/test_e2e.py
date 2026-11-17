@@ -656,9 +656,11 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         return r["messages"][0]["body"]
 
     async def test_each_session_gets_its_own_virtual_key(self):
+        self.b.cfg.network.proxy = "http://proxy.test:3128"  # the gateway must bypass a place's proxy
         st = await self.b.tool("spawn", module="echo", wait=True)
         env = json.loads(await self.ask(st["id"], "ENV"))
         self.assertEqual(env["anthropic_base_url"], "http://gateway.test:4000")
+        self.assertIn("gateway.test", env["no_proxy"])
         self.assertEqual(env["anthropic_api_key"], f"sk-virtual-agora-{st['id']}")
         path, body, auth = self.gw.requests[0]
         self.assertEqual((path, auth), ("/key/generate", "Bearer master-secret-123456"))
