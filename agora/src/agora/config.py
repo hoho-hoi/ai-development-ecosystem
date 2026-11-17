@@ -26,6 +26,21 @@ class DockerSettings(BaseModel):
     build_network: str | None = None
 
 
+class GatewaySettings(BaseModel):
+    """An LLM gateway (LiteLLM Proxy) that holds the provider keys. agora gets
+    a virtual key per session from it."""
+
+    model_config = ConfigDict(extra="forbid")
+    url: str  # as agora reaches it
+    session_url: str | None = None  # as sessions reach it (default: url)
+    master_key_env: str = "LITELLM_MASTER_KEY"  # environment variable holding the gateway's master key
+
+
+class TelemetrySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    otlp_endpoint: str  # OTLP/HTTP traces endpoint, e.g. http://127.0.0.1:6006/v1/traces
+
+
 class PeerSettings(BaseModel):
     """Another place this one trusts: its name, where it listens, its key."""
 
@@ -77,6 +92,10 @@ class BrokerConfig(BaseModel):
     network: Network = Field(default_factory=Network)
     # Per harness: a prebuilt image to use, or the ACP command (local runner).
     harnesses: dict[str, HarnessOverride] = Field(default_factory=dict)
+    # LLM gateway giving each session a virtual key (optional).
+    llm_gateway: GatewaySettings | None = None
+    # Where session traces go (optional).
+    telemetry: TelemetrySettings | None = None
     listen_host: str = "127.0.0.1"
     listen_port: int = 8765
     runner: Literal["docker", "local"] = "docker"

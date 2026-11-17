@@ -64,7 +64,9 @@ from .identity import OPERATOR, Key, message_bytes, session_id_for, split_addres
 from .jsonrpc import ConnectionClosed, RpcError
 from .logins import LoginError, load_chatgpt_login, write_access_only
 from .modules import ModuleCache
+from .gateway import HARNESS_ENV, Gateway
 from .spec import BROKER_TOOLS, Catalog, Spec, Workspace
+from .telemetry import Telemetry
 from .runner import RunHandle, Runner
 from .store import HistoryStore, now
 from .workspace import prepare_workspace
@@ -123,6 +125,7 @@ class Session:
     acp: AcpClient | None = None
     acp_session_id: str | None = None
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    llm_key: str | None = None  # this session's virtual key at the LLM gateway
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     finalized: asyncio.Event = field(default_factory=asyncio.Event)
@@ -192,9 +195,13 @@ class SessionManager:
         catalog: Catalog,
         runner: Runner,
         federation: Federation,
+        telemetry: Telemetry | None = None,
     ):
         self.cfg = cfg
         self.store = store
+        self.telemetry = telemetry or Telemetry()
+        gw = cfg.llm_gateway
+        self.gateway = Gateway(gw.url, gw.session_url or gw.url, gw.master_key_env) if gw else None
         self.catalog = catalog
         self.runner = runner
         self.fed = federation
@@ -474,12 +481,22 @@ class SessionManager:
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )
+        self._trace_start(s, caller)
         s.tasks.append(asyncio.create_task(self._launch(s)))
         task_message_id = None
         if task:
             task_message_id = (await self.send(caller, s.id, task))["message_id"]
         await self._wait_ready(s, wait, wait_timeout)
         return {**self.status(s.id), "task_message_id": task_message_id}
+
+    def _trace_start(self, s: Session, caller: Session) -> None:
+        assert s.spec is not None
+        rt = s.spec.runtime
+        self.telemetry.session_start(s.id, caller.id, {
+            "gen_ai.agent.name": s.spec.id, "gen_ai.agent.id": self.address(s), "gen_ai.request.model": rt.model,
+            "agora.module.version": s.spec.version, "agora.fingerprint": s.spec.fingerprint,
+            "agora.harness": f"{rt.harness}@{rt.version}", "agora.parent": s.parent_id, "agora.place": self.place,
+        })
 
     async def clone(
         self, caller: Session, ref: str, name: str | None = None, wait: bool = True, wait_timeout: float = 600
@@ -519,6 +536,7 @@ class SessionManager:
             fingerprint=spec.fingerprint,
             public_key=s.key.public_hex if s.key else None,
         )
+        self._trace_start(s, caller)
         s.tasks.append(asyncio.create_task(self._launch(s, seed=seed, load=load)))
         await self._wait_ready(s, wait, wait_timeout)
         return self.status(s.id)
@@ -576,7 +594,17 @@ class SessionManager:
             if s.state != "preparing":  # terminated while preparing
                 return
             self._set_state(s, "starting")
-            s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path)
+            extra_secrets: dict[str, str] = {}
+            if self.gateway and spec.runtime.harness in HARNESS_ENV:
+                url_var, key_var = HARNESS_ENV[spec.runtime.harness]
+                meta = {"agora_session": self.address(s), "module": spec.id, "module_version": spec.version,
+                        "fingerprint": spec.fingerprint, "place": self.place}
+                s.llm_key = await asyncio.to_thread(self.gateway.mint, s.id, meta)
+                self.store.add_secret("llm_key", s.llm_key)
+                env[url_var] = self.gateway.session_url
+                extra_secrets[key_var] = s.llm_key
+                self.store.record("session.llm_key", session_id=s.id, gateway=self.gateway.session_url, metadata=meta)
+            s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path, secrets=extra_secrets)
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
 
@@ -587,6 +615,7 @@ class SessionManager:
                 upd = params.get("update") or {}
                 if upd.get("sessionUpdate") == "usage_update":
                     s.usage = upd
+                self.telemetry.acp_update(s.id, upd)
 
             def on_permission(params: dict[str, Any], outcome: dict[str, Any]) -> None:
                 self.store.record("acp.permission", session_id=s.id, request=params, outcome=outcome)
@@ -696,7 +725,10 @@ class SessionManager:
             if s.spec.runtime.session_mode == "per_message" and s.turns > 0:
                 await self._fresh_conversation(s)
             s.turns += 1
+            self.telemetry.turn_start(s.id, {"agora.message_id": msg["id"], "agora.thread_id": msg["thread_id"],
+                                             "agora.from": msg.get("from_id") or msg.get("from")})
             stop_reason, agent_text = await s.acp.prompt(s.acp_session_id, text)
+            self.telemetry.turn_end(s.id, {"agora.stop_reason": stop_reason})
         except (ConnectionClosed, RpcError) as e:
             self.store.record("session.error", session_id=s.id, stage="prompt", error=repr(e))
             await self._finalize(s, "failed", f"prompt failed: {e}")
@@ -766,6 +798,8 @@ class SessionManager:
                 "message.send", session_id=caller.id, thread_id=thread_id, message_id=env["id"],
                 to=env["to"], body=body, reply_to=reply_to, sig=env["sig"],
             )
+            self.telemetry.event(caller.id, "send", {"agora.to": env["to"], "agora.message_id": env["id"],
+                                                     "agora.thread_id": thread_id, "agora.reply_to": reply_to})
             return result
         env = self._envelope(caller, f"{ref}@{place}", body, thread_id, reply_to)
         res = await self._deliver_remote(place, env)
@@ -1102,6 +1136,9 @@ class SessionManager:
                 shutil.rmtree(self.cfg.state_dir / "bundles" / s.id, ignore_errors=True)
             if s.acp:
                 await s.acp.close()
+            if s.llm_key and self.gateway:
+                key, s.llm_key = s.llm_key, None
+                await asyncio.to_thread(self.gateway.revoke, key)
         except Exception as e:
             log.exception("cleanup of %s failed", s.id)
             self.store.record("session.error", session_id=s.id, stage="cleanup", error=repr(e))
@@ -1109,6 +1146,7 @@ class SessionManager:
             s.state = prev  # let _set_state log the real transition
             self._set_state(s, state, reason=reason)
             self.store.record("session.end", session_id=s.id, state=state, reason=reason)
+            self.telemetry.session_end(s.id, state, reason)
             s.mail.set()
             s.finalized.set()
 

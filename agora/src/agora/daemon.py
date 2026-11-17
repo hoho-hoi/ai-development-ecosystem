@@ -35,6 +35,7 @@ from .federation import Federation, Peer
 from .identity import load_or_create_key
 from .modules import ModuleCache
 from .spec import BROKER_TOOLS, Catalog
+from .telemetry import Telemetry
 from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
@@ -116,7 +117,7 @@ def make_sockets(cfg: BrokerConfig, runner: Runner) -> list[socket.socket]:
 
 
 class Broker:
-    def __init__(self, cfg: BrokerConfig, runner: Runner | None = None):
+    def __init__(self, cfg: BrokerConfig, runner: Runner | None = None, telemetry: Telemetry | None = None):
         self.cfg = cfg
         self.key = ensure_broker_key(cfg)
         self.store = HistoryStore(cfg.history_dir)
@@ -130,7 +131,9 @@ class Broker:
             load_or_create_key(cfg.place_key_file),
             [Peer(p.name, p.url, p.public_key) for p in cfg.peers],
         )
-        self.manager = SessionManager(cfg, self.store, self.catalog, runner or make_runner(cfg), self.federation)
+        self.telemetry = telemetry or Telemetry(cfg.telemetry.otlp_endpoint if cfg.telemetry else None, cfg.place)
+        self.manager = SessionManager(cfg, self.store, self.catalog, runner or make_runner(cfg), self.federation,
+                                      self.telemetry)
 
     def _bearer(self, request: Request) -> str:
         auth = request.headers.get("authorization", "")
@@ -344,6 +347,7 @@ class Broker:
                 yield
             finally:
                 await self.manager.shutdown()
+                self.telemetry.shutdown()
                 self.store.record("broker.stop")
 
         return Starlette(

@@ -57,6 +57,7 @@ class Runner(abc.ABC):
         bundle: Path,
         env: dict[str, str],
         stderr_path: Path,
+        secrets: dict[str, str] | None = None,
     ) -> RunHandle:
         ...
 

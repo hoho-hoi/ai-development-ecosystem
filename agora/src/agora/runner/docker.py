@@ -73,6 +73,7 @@ def build_create_args(
     network: str,
     owner: str = "",
     image: str | None = None,
+    extra_secrets: tuple[str, ...] = (),
 ) -> list[str]:
     """The full `docker create` argv. Secret values never appear here: they
     are passed as `-e NAME` and taken from the docker CLI's environment."""
@@ -106,7 +107,7 @@ def build_create_args(
             args += ["--env", "NO_PROXY=host.docker.internal", "--env", "no_proxy=host.docker.internal"]
     for key, value in sorted(env.items()):
         args += ["--env", f"{key}={value}"]
-    for secret in spec.runtime.secrets:
+    for secret in [*spec.runtime.secrets, *(n for n in extra_secrets if n not in spec.runtime.secret_env)]:
         args += ["--env", secret]
     args += [image or spec.runtime.image or "", *spec.runtime.adapter]
     return args
@@ -190,16 +191,19 @@ class DockerRunner(Runner):
             await _run(self.docker, "network", "create", "--driver", "bridge", self.network)
         self._network_ready = True
 
-    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
+    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path,
+                    secrets: dict[str, str] | None = None) -> RunHandle:
         if spec.network.mode != "none":
             await self._ensure_network()
         image = await self.ensure_image(spec)
         name = container_name(session_id)
         tar_path = bundle.with_suffix(".tar")
         await asyncio.to_thread(pack_bundle, bundle, tar_path)
-        args = build_create_args(self.docker, session_id, spec, env, self.network, self.owner, image)
+        secret_values = {**spec.runtime.secret_values(), **(secrets or {})}
+        args = build_create_args(self.docker, session_id, spec, env, self.network, self.owner, image,
+                                 extra_secrets=tuple(secrets or {}))
         # Secret values go only into the docker CLI's environment (`-e NAME`).
-        await _run(*args, env={**os.environ, **spec.runtime.secret_values()})
+        await _run(*args, env={**os.environ, **secret_values})
         try:
             await _run(self.docker, "cp", str(tar_path), f"{name}:{CONTAINER_BUNDLE}")
             stderr = open(stderr_path, "ab")

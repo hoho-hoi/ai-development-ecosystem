@@ -589,3 +589,98 @@ class BridgeTests(BrokerCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeGateway:
+    """Stands in for LiteLLM's /key/generate and /key/delete."""
+
+    def __init__(self):
+        import http.server
+        import threading
+
+        self.requests: list[tuple[str, dict, str]] = []
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                outer.requests.append((self.path, body, self.headers.get("Authorization", "")))
+                out = {"key": "sk-virtual-" + body.get("key_alias", "x")} if self.path == "/key/generate" else {}
+                data = json.dumps(out).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        from agora.telemetry import Telemetry
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        repo, commit, _ = make_repo(self.tmp)
+        self.gw = FakeGateway()
+        os.environ["TEST_LITELLM_MASTER"] = "master-secret-123456"
+        os.environ["AGORA_TEST_SECRET"] = SECRET
+        self.spans = InMemorySpanExporter()
+        self.b = RunningBroker(self.tmp, repo, commit,
+                               llm_gateway={"url": self.gw.url, "session_url": "http://gateway.test:4000",
+                                            "master_key_env": "TEST_LITELLM_MASTER"},
+                               telemetry=Telemetry(exporter=self.spans, place="pc1"))
+        await self.b.start()
+
+    async def asyncTearDown(self):
+        await self.b.stop()
+        self.gw.close()
+        os.environ.pop("TEST_LITELLM_MASTER", None)
+        os.environ.pop("AGORA_TEST_SECRET", None)
+        self._tmp.cleanup()
+
+    async def ask(self, sid, body):
+        sent = await self.b.tool("send", to=sid, body=body)
+        r = await self.b.tool("receive", reply_to=sent["message_id"], wait=20)
+        return r["messages"][0]["body"]
+
+    async def test_each_session_gets_its_own_virtual_key(self):
+        st = await self.b.tool("spawn", module="echo", wait=True)
+        env = json.loads(await self.ask(st["id"], "ENV"))
+        self.assertEqual(env["anthropic_base_url"], "http://gateway.test:4000")
+        self.assertEqual(env["anthropic_api_key"], f"sk-virtual-agora-{st['id']}")
+        path, body, auth = self.gw.requests[0]
+        self.assertEqual((path, auth), ("/key/generate", "Bearer master-secret-123456"))
+        self.assertEqual((body["metadata"]["module"], body["metadata"]["agora_session"]), ("echo", f"{st['id']}@pc1"))
+        # the key never reaches the history
+        hist = json.dumps(await self.b.tool("history", session=st["id"]))
+        self.assertNotIn(f"sk-virtual-agora-{st['id']}", hist)
+        await self.b.tool("terminate", session=st["id"])
+        self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
+                      [(p, b) for p, b, _ in self.gw.requests])
+
+    async def test_spawned_sessions_form_one_trace(self):
+        st = await self.b.tool("spawn", module="echo", wait=True)
+        r = json.loads(await self.ask(st["id"], 'BRIDGE spawn {"module": "peer", "wait": true}'))
+        child = json.loads(r["content"][0]["text"])["id"]
+        await self.b.tool("terminate", session=child)
+        await self.b.tool("terminate", session=st["id"])
+        spans = {s.name: s for s in self.spans.get_finished_spans()}
+        parent, kid = spans["invoke_agent echo"], spans["invoke_agent peer"]
+        self.assertEqual(kid.parent.span_id, parent.context.span_id)  # the spawned session hangs under its parent
+        self.assertEqual(kid.context.trace_id, parent.context.trace_id)
+        self.assertEqual(parent.attributes["gen_ai.request.model"], "test-model-1")
+        turns = [s for s in self.spans.get_finished_spans() if s.name == "turn" and s.parent.span_id == parent.context.span_id]
+        self.assertTrue(turns)
+        self.assertIn("send", [e.name for e in parent.events])  # echo answered with send

@@ -14,7 +14,7 @@
 # commit; a local one is for development. The module's id is its plugin.json name.
 modules:
   - repo: https://github.com/ysgrProgramming/romaji-converter.git
-    ref: 049b3e436c5282d8c8ceff97c05e41f4a792fb20
+    ref: 5d1255bf8f9b226703984332a03461d2884d6316
     path: execution
   - local: examples/modules/caller
 
@@ -56,6 +56,18 @@ docker:
 # or the ACP command (local runner).
 # harnesses:
 #   claude-code: {image: "sha256:..."}
+
+# LLM gateway (LiteLLM Proxy). It holds the provider keys; agora gets a
+# virtual key per session (tagged with the session, module and version, so
+# the gateway can report cost per session) and deletes it when the session ends.
+# llm_gateway:
+#   url: http://127.0.0.1:4000              # as agora reaches it
+#   session_url: http://172.18.0.1:4000     # as sessions reach it (default: url)
+#   master_key_env: LITELLM_MASTER_KEY      # environment variable with the gateway's master key
+
+# Session traces over OTLP/HTTP (OpenTelemetry), e.g. to Phoenix.
+# telemetry:
+#   otlp_endpoint: http://127.0.0.1:6006/v1/traces
 
 # Global caps.
 max_sessions: 8          # live managed sessions

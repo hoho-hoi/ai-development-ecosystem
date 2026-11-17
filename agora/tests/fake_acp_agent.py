@@ -206,6 +206,8 @@ def handle_prompt(rid, params):
                 "cwd": os.getcwd(),
                 "files": sorted(str(p.relative_to(os.getcwd())) for p in Path.cwd().rglob("*") if ".git" not in p.parts),
                 "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+                "anthropic_base_url": os.environ.get("ANTHROPIC_BASE_URL"),
+                "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY"),
                 "config_files": sorted(
                     str(p.relative_to(os.environ["CLAUDE_CONFIG_DIR"]))
                     for p in Path(os.environ.get("CLAUDE_CONFIG_DIR", "/nonexistent")).rglob("*")

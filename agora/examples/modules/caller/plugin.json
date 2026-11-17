@@ -7,9 +7,9 @@
     "io.github.hoho-hoi.agora": {
       "runtimes": [
         {
-          "harness": "opencode",
-          "version": "2.3.0",
-          "model": "opencode/deepseek-v4.1-flash-free"
+          "harness": "claude-code",
+          "version": "0.75.1",
+          "model": "claude-haiku-5-5"
         }
       ],
       "tools": [

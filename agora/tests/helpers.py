@@ -193,7 +193,8 @@ class RunningBroker:
     """A place (broker + uvicorn on a free port) inside the test's event loop.
     Several can run side by side, each in its own directory, as peers."""
 
-    def __init__(self, tmp: Path, repo: Path, commit: str, docker_image: str | None = None, place: str = "pc1"):
+    def __init__(self, tmp: Path, repo: Path, commit: str, docker_image: str | None = None, place: str = "pc1",
+                 llm_gateway: dict | None = None, telemetry: Any = None):
         if not (tmp / "module-repo").exists():
             make_module_repo(tmp)
         module_repo = (tmp / "module-repo", git(tmp / "module-repo", "rev-parse", "HEAD"))
@@ -216,9 +217,10 @@ class RunningBroker:
             max_sessions=6,
             max_spawn_depth=2,
             codex_login_dir=tmp / "codex-login",
+            llm_gateway=llm_gateway,
         )
         make_codex_login(tmp / "codex-login")
-        self.broker = Broker(self.cfg)
+        self.broker = Broker(self.cfg, telemetry=telemetry)
         self.sockets = make_sockets(self.cfg, self.broker.manager.runner)
         self.url = self.cfg.local_url
         self._task: asyncio.Task[None] | None = None

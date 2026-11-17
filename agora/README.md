@@ -10,7 +10,7 @@
 - **再現性**：モジュールとワークスペースはコミット SHA で、ハーネスはモジュールが指定する版で固定し、実際に使ったイメージの ID・モデル・ファイルの hash を履歴に残します。CLAUDE.md・AGENTS.md・`.claude/` などプロジェクト側の設定は全階層から除去し、ホストの `~/.claude` や `~/.codex` も読ませません。
 - **実行履歴**：送信原文、セッションに実際に投入した文面、ACP の生のやりとりまで、追記専用で記録します。履歴は誰でも読め、動いている最中の人の考えも追いかけられます。
 
-状態は v0.8 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
+状態は v0.9 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
 
 ## 構成
 
@@ -135,6 +135,26 @@ agora call receive '{"from": "s-…@pc2", "reply_to": "m-…", "wait": 600}' --c
 
 起動されたセッションは pc2 に住み、pc2 に登録されたモジュールとそこで作ったイメージで動きます。親は `operator@pc1` です。
 
+## LLM ゲートウェイ（LiteLLM）
+
+本物の API キーは [LiteLLM Proxy](https://docs.litellm.ai/) だけに持たせます。`agora.yaml` に `llm_gateway` を書くと、agora はセッションを起動するたびに LiteLLM で仮想キーを1本発行し（`/key/generate`。metadata にセッション・モジュール・版・fingerprint・場所）、終了時に削除します（`/key/delete`）。
+
+- セッションには `ANTHROPIC_BASE_URL`（LiteLLM）と `ANTHROPIC_API_KEY`（仮想キー）を渡します。仮想キーは履歴で伏せます。いまは Claude Code のハーネスだけが対象です。
+- 費用は LiteLLM がキーごとに集計するので、セッション・モジュール・版ごとに読めます（LiteLLM のデータベースが要ります）。
+- モジュールの起動条件に認証を書く必要はなくなります。
+- LiteLLM の設定（モデルの一覧、本物のキー、データベース）は LiteLLM 側で行います。
+
+## トレース（OpenTelemetry）
+
+`agora.yaml` に `telemetry.otlp_endpoint` を書くと、セッションのトレースを OTLP/HTTP で送ります。閲覧は Phoenix など OTLP を受けるものなら何でも構いません。追記専用の履歴は今のまま残り、トレースは閲覧用です。
+
+| スパン | 内容 |
+| --- | --- |
+| `invoke_agent <モジュール>` | 1セッション。spawn されたセッションは、起動したセッションの子になる（1本の木）。属性：`gen_ai.agent.name`、`gen_ai.request.model`、版、fingerprint、ハーネス |
+| `turn` | 1ターン（届いたメッセージ1通の処理）。message_id、終了理由 |
+| `execute_tool <名前>` | ACP のツール呼び出し1回 |
+| イベント `send` | セッションが送ったメッセージ（宛先、message_id） |
+
 ## クローン
 
 `clone` は、ある人のその時点の記憶を持った別の人を作ります。
@@ -213,7 +233,7 @@ my-module/
 ```yaml
 modules:
   - repo: https://github.com/ysgrProgramming/romaji-converter.git
-    ref: 049b3e436c5282d8c8ceff97c05e41f4a792fb20   # コミット SHA（ブランチ名は拒否）
+    ref: 5d1255bf8f9b226703984332a03461d2884d6316   # コミット SHA（ブランチ名は拒否）
     path: execution                                  # リポジトリ内のディレクトリ（既定はルート）
   - local: examples/modules/caller                   # 開発用。中身のハッシュが fingerprint に入る
 ```

@@ -32,7 +32,8 @@ class LocalRunner(Runner):
     def runtime_paths(self, bundle: Path) -> tuple[str, str]:
         return str(bundle / "workspace"), str(bundle / "home" / ".agora")
 
-    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path) -> RunHandle:
+    async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path,
+                    secrets: dict[str, str] | None = None) -> RunHandle:
         workspace, agora = self.runtime_paths(bundle)
         home = bundle / "home"
         # The bundle's agora/ dir becomes $HOME/.agora, mirroring the container layout.
@@ -43,6 +44,7 @@ class LocalRunner(Runner):
         child_env.update({"HOME": str(home), "TMPDIR": str(bundle / "tmp")})
         (bundle / "tmp").mkdir(exist_ok=True)
         child_env.update(spec.runtime.secret_values())
+        child_env.update(secrets or {})
         child_env.update(env)
         stderr = open(stderr_path, "ab")
         try:

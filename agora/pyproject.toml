@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agora"
-version = "0.8.0"
+version = "0.9.0"
 description = "Spawn coding-agent sessions from profiles in isolated containers and let them talk over MCP"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,8 @@ dependencies = [
     "starlette>=0.37",
     "uvicorn>=0.29",
     "cryptography>=41",  # Ed25519 keys of places and people
+    "opentelemetry-sdk>=1.30",  # traces of sessions (telemetry)
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
 ]
 
 [project.optional-dependencies]

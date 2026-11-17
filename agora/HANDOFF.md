@@ -37,6 +37,18 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.9.0（2026-11-17）：LiteLLM と OpenTelemetry
+
+ユーザーとの合意（要件図：https://claude.ai/artifact/1u1fvwYxCRiHAgPCoygNRB）：
+
+- **調査の結論**：認証の保管・MCP の接続・閲覧 UI は外注できる。LiteLLM Proxy は「まさにそれが欲しかった」、OpenTelemetry を使う、Open WebUI は不採用、op run は今は不要（ユーザー）。
+- **規約**：Claude Code の公式文書（Legal and compliance）では、サブスクの OAuth は Claude Code など純正アプリの通常利用のためのもので、Agent SDK を使うものを含む開発者のものは API キーを使う。開発者は Claude.ai の認証情報やトークンを保存・仲介してはならない。agora が OAuth トークンを保存してアダプタに渡すのはこれに当たりうるので、API キー（従量課金）に切り替えた。前回クラウドで作った OAuth トークンは使わない。
+- **LLM ゲートウェイ**：`agora.yaml` の `llm_gateway`（`url`・`session_url`・`master_key_env`）。セッションごとに LiteLLM の仮想キーを発行（metadata：セッション・モジュール・版・fingerprint・場所）し、`ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY` でセッションに渡し、終了時に削除する（Q4「セッション毎の方がいい」）。いまは Claude Code のハーネスだけ。
+- **トレース**：`agora.yaml` の `telemetry.otlp_endpoint`。`invoke_agent <モジュール>`（子セッションは親の下）→ `turn` → `execute_tool`、send はイベント。閲覧は Phoenix（ユーザー：どちらでもいいので Phoenix）。
+- **入れなかったもの**：費用の上限（maxBudgetUsd）。ユーザー：「余計なのでいれない。今後もサイレントに余計な機能を入れたりしたら刺す。私は最小でシンプルなものを作りたい。何か機能を付け足すのは、実際に困ったときや、必要なのが明らかすぎるときで十分」。**機能を足す前に必ず聞くこと。**
+- **モデル**：無料モデルは無料枠に制限があるので使わない（ユーザー）。romaji・akinator・caller は Haiku、コアは Sonnet。モジュールに認証は書かない。
+- テスト 90 件（偽の LiteLLM と、メモリ上のスパンの受け取りで確認）。
+
 ## v0.8.0（2026-11-15）：プロファイルを廃止し、起動条件をモジュールの plugin.json に
 
 ユーザーの方針と合意（要件図：https://claude.ai/artifact/13CcgZ1w9dByA7ZkvPsxUm）：
