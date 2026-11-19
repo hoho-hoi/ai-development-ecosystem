@@ -44,7 +44,18 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - ユーザーの方針：「pi独自の機能に頼らない」。codemode・拡張・パッケージは使わず、`cacheWarming` は切った。
 - pi-acp は ACP の mcpServers を pi に渡さないので、アダプタが pi の `mcp.json` を書く。コンテナには設定を起動時に一度だけ送るので、MCP サーバーの一覧はプロセスの起動前に確定させるよう順序を変えた（`Runner.bridge_command` を追加）。
 - 作業場所から除去するものに `.pi` と `.agents` を足した。
-- 実 API（Haiku、LiteLLM 経由）で Claude Code と比べた。費用は romaji 1 件で約 1/10、caller で約 1/7。数字は `docs/harness-adapters.md` の 5 章。
+- `docs/harness-adapters.md` は、特定のハーネスに依存しない、どのアダプタにも求める要件として書き直した。ユーザーの言葉：「今あるハーネスのどこに移すのかを列挙してほしいんじゃなくて、特定のハーネスに依存しない、どんなハーネスに対しても満たしてほしい要件についてまとめてほしい」。
+- pi-acp の版は `images/pi/Dockerfile` に固定。壊れたら pi の RPC モード（または SDK）に直接つなぐ自前のアダプタに切り替える。
+- 実 API（Haiku 5.5、LiteLLM 経由、同じモジュールで runtimes だけ替えた）での比較：
+
+  | 実行 | Claude Code | pi |
+  |---|---|---|
+  | romaji 1 件 | 3 回 / 74,437 トークン / $0.0056 | 2 回 / 4,731 / $0.00052 |
+  | caller（caller 分） | 5 / 156,974 / $0.0070 | 4 / 14,687 / $0.00098 |
+  | caller（子の romaji 分） | 3 / 74,879 / $0.0021 | 2 / 4,762 / $0.00028 |
+  | romaji 6 件 | 17 / 411,555 / $0.016 | 11 / 26,758 / $0.0024 |
+
+  pi でもモデルの確認、send での返信、caller の手順は守られた。LiteLLM 経由でもキャッシュは効いた。質は 6 件で差がまちまち（pi は英語の一文を落とし、Claude Code は ikimast を「いきmast」にした）。質の比較は評価ケースを繰り返し流してから。未確認：pi での clone、builtinTools: true。
 
 ## v0.9.0（2026-11-17）：LiteLLM と OpenTelemetry
 
