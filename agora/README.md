@@ -1,6 +1,6 @@
 # agora
 
-コーディングエージェント（Claude Code、Codex、OpenCode など）のセッションを、モジュールから隔離コンテナで起動し、セッション同士を MCP 経由でやりとりさせる仕組みです。
+コーディングエージェント（Claude Code、Codex、OpenCode、pi など）のセッションを、モジュールから隔離コンテナで起動し、セッション同士を MCP 経由でやりとりさせる仕組みです。
 
 セッションは操り人形ではなく、ひとりの「人」として扱います。人は自分の鍵と住所と受信箱を持ち、誰とでも `send` と `receive` で話します。現実の人と違うのは次の点です。必要なときに作れ、要らなくなればすぐ消せ、同じ人からいくらでも複製（clone）でき、何を考えているかを誰でも読めます。
 
@@ -207,7 +207,7 @@ my-module/
 
 | 項目（拡張の中） | 内容 |
 | --- | --- |
-| `runtimes` | 起動条件の候補。`harness`（`claude-code` / `codex` / `opencode`）、`version`（ハーネスの版。イメージはこれから作る）、`model`、`env`、`login`（`chatgpt`：Codex を場所の ChatGPT ログインで）。上から順に、この場所で使えるもの（参照している環境変数がすべてある）を選び、`session.spawn` に記録する。再現性のため、ふだんは1つにする |
+| `runtimes` | 起動条件の候補。`harness`（`claude-code` / `codex` / `opencode` / `pi`）、`version`（ハーネスの版。イメージはこれから作る）、`model`、`env`、`login`（`chatgpt`：Codex を場所の ChatGPT ログインで）。上から順に、この場所で使えるもの（参照している環境変数がすべてある）を選び、`session.spawn` に記録する。再現性のため、ふだんは1つにする |
 | `env` | 値は文字列そのもの、またはマシンの環境変数を1つ参照する `${VAR}`。参照した値は秘密として扱い、履歴で伏せる |
 | `tools` | 渡す agora のツール（`[send]` など）。`true` はすべて（既定）、`false` はなし。場所もセッションのトークンに同じ制限をかける |
 | `builtinTools` | ハーネス組み込みのツール（シェル、ファイル操作、Web など）を使うか（既定 `true`）。権限はいつもフルで、確認待ちで止まらない。やらせたくないことは、ツールや MCP を渡さないことで防ぐ。`false` なら組み込みのツールを止め（Claude Code は拒否リスト、Codex は読み取り専用、権限要求は拒否）、agora のツールと MCP だけで動く |
@@ -221,7 +221,7 @@ my-module/
 - **skill**：`skills/` の直下のディレクトリだけを読みます。`SKILL.md` の `name` はディレクトリ名と同じにします。
 - **MCP サーバー**（`mcp.json`）：`stdio` と `http`（`streamable-http`）に対応します。モジュール全体をセッションの中に写し、`${PLUGIN_ROOT}` と `./` で始まる `command` をその場所に置き換えて、ACP の `session/new` で渡します。`command` は1つの実行ファイル（コマンドラインは不可）、`cwd` は使えません（ACP にない）、リモートは https のみ、名前 `agora` はブリッジ用に予約しています。
 - **モデルの確認**：ハーネスが ACP でモデルの選択肢を示す場合、起動時に現在のモデルを確かめ、違えばモジュールのモデルに切り替えます。選択肢にないときは、別のモデルで動かさずに起動を失敗させます（`session.model` に記録）。
-- **作業場所**：作業するリポジトリは依頼ごとに変わるので、`spawn` の `workspace`（`{repo, ref}`）で渡します。CLAUDE.md・AGENTS.md・`.claude`・`.mcp.json`・`.codex`・`.gemini`・`.opencode` などは全階層から除去します。
+- **作業場所**：作業するリポジトリは依頼ごとに変わるので、`spawn` の `workspace`（`{repo, ref}`）で渡します。CLAUDE.md・AGENTS.md・`.claude`・`.mcp.json`・`.codex`・`.gemini`・`.opencode`・`.pi`・`.agents` などは全階層から除去します。
 - サブエージェントは持ちません。別のエージェントが必要なら、agora で別のセッションを起こして話します。
 - モジュールのディレクトリの外のファイルはエージェントに渡りません。リポジトリのどこに何を置くかは利用者の自由です。
 - 以前の `module.json` は読みません（見つかると移行を促すエラーになります）。
@@ -239,6 +239,20 @@ modules:
 ```
 
 見本のモジュール：[examples/modules/caller](examples/modules/caller)（依頼に合う登録済みのモジュールを選んで起動し、返事を取り次ぐ。セッションから別のセッションを起動できるかの確認用）
+
+## pi で動かす
+
+pi は ACP アダプタ pi-acp を通して動かします（版は `images/pi/Dockerfile` に固定）。起動条件の例：
+
+```json
+{"harness": "pi", "version": "1.5.2", "model": "claude-haiku-5-5"}
+```
+
+- 何をどこに写すかは [docs/harness-adapters.md](docs/harness-adapters.md) にまとめています。
+- 指示・skill・`settings.json`・`mcp.json`・`models.json` を、セッション専用の pi の設定ディレクトリに置きます。HOME もセッションの中にします。
+- MCP のツール（agora のツールとモジュールの MCP）は、すべて最初からモデルに見せます（`exposure: "direct"`）。codemode は使いません。
+- LLM の接続先は `models.json` に書き、仮想キーは環境変数から読ませます。
+- `builtinTools: false` は `defaultTools: []` にします。自動の通信（`PI_OFFLINE`）、パッケージ、キャッシュの維持、統計の送信は切ります。
 
 ## OpenCode で動かす
 

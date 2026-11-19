@@ -121,6 +121,7 @@ def pack_bundle(bundle: Path, dest: Path) -> None:
 
 
 class DockerRunner(Runner):
+    bridge_command = CONTAINER_BRIDGE
     name = "docker"
 
     def __init__(

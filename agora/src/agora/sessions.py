@@ -57,6 +57,8 @@ from .federation import Federation, PlaceError
 from .harness import (
     BRIDGE_SERVER,
     CREDENTIAL_FILES,
+    finish_harness_config,
+    harness_model_id,
     harness_record_dir,
     prepare_harness_config,
     resolve_definition,
@@ -608,6 +610,35 @@ class SessionManager:
                     host = urllib.parse.urlsplit(self.gateway.session_url).hostname or ""
                     env["NO_PROXY"] = env["no_proxy"] = f"host.docker.internal,{host}"
                 self.store.record("session.llm_key", session_id=s.id, gateway=self.gateway.session_url, metadata=meta)
+            # The session's MCP servers (agora's bridge, then the module's), and the
+            # harness config that needs them, are settled before the process starts:
+            # a container receives its files once, at start.
+            mcp_servers: list[dict[str, Any]] = []
+            tools = spec.runtime.broker_tools
+            if tools:
+                bridge_env = [
+                    {"name": "AGORA_BROKER_URL", "value": self.runner.broker_url},
+                    {"name": "AGORA_TOKEN", "value": s.token},
+                ]
+                if set(tools) != set(BROKER_TOOLS):
+                    bridge_env.append({"name": "AGORA_TOOLS", "value": ",".join(tools)})
+                mcp_servers.append(
+                    {
+                        "name": BRIDGE_SERVER,
+                        "command": self.runner.bridge_command[0],
+                        "args": self.runner.bridge_command[1:],
+                        "env": bridge_env,
+                    }
+                )
+            names = [m["name"] for m in mcp_servers]
+            clash = sorted({m["name"] for m in module_mcp} & set(names))
+            if clash:
+                raise BrokerError(f"the module's MCP servers clash with agora's: {', '.join(clash)}")
+            mcp_servers += module_mcp
+            s.mcp_servers = mcp_servers
+            await asyncio.to_thread(
+                finish_harness_config, spec, bundle / "agora", mcp_servers, env.get("AGORA_LLM_URL")
+            )
             s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path, secrets=extra_secrets)
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
@@ -633,29 +664,6 @@ class SessionManager:
                 on_permission=on_permission,
             )
             await s.acp.initialize()
-            mcp_servers: list[dict[str, Any]] = []
-            tools = spec.runtime.broker_tools
-            if tools:
-                bridge_env = [
-                    {"name": "AGORA_BROKER_URL", "value": s.handle.broker_url},
-                    {"name": "AGORA_TOKEN", "value": s.token},
-                ]
-                if set(tools) != set(BROKER_TOOLS):
-                    bridge_env.append({"name": "AGORA_TOOLS", "value": ",".join(tools)})
-                mcp_servers.append(
-                    {
-                        "name": BRIDGE_SERVER,
-                        "command": s.handle.bridge_command[0],
-                        "args": s.handle.bridge_command[1:],
-                        "env": bridge_env,
-                    }
-                )
-            names = [m["name"] for m in mcp_servers]
-            clash = sorted({m["name"] for m in module_mcp} & set(names))
-            if clash:
-                raise BrokerError(f"the module's MCP servers clash with agora's: {', '.join(clash)}")
-            mcp_servers += module_mcp
-            s.mcp_servers = mcp_servers
             if load:
                 if not (s.acp.agent_info.get("agentCapabilities") or {}).get("loadSession"):
                     raise BrokerError("this harness cannot resume a conversation (no ACP loadSession); clone needs it")
@@ -663,7 +671,7 @@ class SessionManager:
                 s.acp_session_id = load
             else:
                 s.acp_session_id, choice = await s.acp.new_session(
-                    s.handle.workspace_path, mcp_servers, model=spec.runtime.model
+                    s.handle.workspace_path, mcp_servers, model=harness_model_id(spec)
                 )
                 if choice:
                     self.store.record("session.model", session_id=s.id, **choice)
@@ -694,7 +702,7 @@ class SessionManager:
             except Exception as e:
                 self.store.record("session.error", session_id=s.id, stage="session_close", error=repr(e))
         assert s.spec is not None
-        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=s.spec.runtime.model)
+        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=harness_model_id(s.spec))
         self.store.record("session.conversation", session_id=s.id, acp_session_id=s.acp_session_id, previous=old)
 
     async def _watch_process(self, s: Session) -> None:

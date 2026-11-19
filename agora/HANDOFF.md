@@ -37,6 +37,15 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.10.0（2026-11-19）：pi のアダプタ
+
+- ハーネスに pi を足した（pi-acp 経由。`images/pi/Dockerfile`）。モジュールから何を写すかを `docs/harness-adapters.md` に文書として定めた。
+- ユーザーの要望：「少なくともtoolやskillと同様にmcpも初手で呼べるツールの一覧が表示されるようにしてほしい」。pi の MCP は既定で codemode（ツールを宣言しない）なので、すべて `direct` にした。
+- ユーザーの方針：「pi独自の機能に頼らない」。codemode・拡張・パッケージは使わず、`cacheWarming` は切った。
+- pi-acp は ACP の mcpServers を pi に渡さないので、アダプタが pi の `mcp.json` を書く。コンテナには設定を起動時に一度だけ送るので、MCP サーバーの一覧はプロセスの起動前に確定させるよう順序を変えた（`Runner.bridge_command` を追加）。
+- 作業場所から除去するものに `.pi` と `.agents` を足した。
+- 実 API（Haiku、LiteLLM 経由）で Claude Code と比べた。費用は romaji 1 件で約 1/10、caller で約 1/7。数字は `docs/harness-adapters.md` の 5 章。
+
 ## v0.9.0（2026-11-17）：LiteLLM と OpenTelemetry
 
 ユーザーとの合意（要件図：https://claude.ai/artifact/1u1fvwYxCRiHAgPCoygNRB）：

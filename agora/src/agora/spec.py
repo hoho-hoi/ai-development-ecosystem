@@ -47,6 +47,8 @@ DEFAULT_STRIP: tuple[str, ...] = (
     "GEMINI.md",
     ".gemini",
     ".opencode",
+    ".pi",
+    ".agents",
 )
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # SHA-1 or SHA-256 object ids
@@ -61,6 +63,7 @@ HARNESSES: dict[str, dict[str, Any]] = {
     "claude-code": {"adapter": ["claude-agent-acp"], "version_arg": "CLAUDE_AGENT_ACP_VERSION"},
     "codex": {"adapter": ["codex-acp"], "version_arg": "CODEX_ACP_VERSION"},
     "opencode": {"adapter": ["opencode", "acp"], "version_arg": "OPENCODE_VERSION"},
+    "pi": {"adapter": ["pi-acp"], "version_arg": "PI_VERSION"},
 }
 
 # Claude Code tools turned off when a module has builtinTools: false.

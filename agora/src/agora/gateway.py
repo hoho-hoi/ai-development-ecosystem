@@ -22,6 +22,9 @@ class GatewayError(RuntimeError):
 # How each harness is pointed at an Anthropic-compatible gateway.
 HARNESS_ENV = {
     "claude-code": ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"),
+    # pi takes no base URL from the environment: the adapter writes it into
+    # models.json, which reads the key from this variable.
+    "pi": ("AGORA_LLM_URL", "AGORA_LLM_KEY"),
 }
 
 
