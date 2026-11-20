@@ -27,7 +27,6 @@ class LocalRunner(Runner):
 
     def __init__(self, broker_url: str, keep_bundles: bool = False):
         self.broker_url = broker_url
-        self.bridge_command = [sys.executable, str(BRIDGE_FILE)]
         self.keep_bundles = keep_bundles
 
     def runtime_paths(self, bundle: Path) -> tuple[str, str]:

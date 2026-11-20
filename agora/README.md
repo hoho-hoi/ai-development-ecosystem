@@ -242,17 +242,17 @@ modules:
 
 ## pi で動かす
 
-pi は ACP アダプタ pi-acp を通して動かします（版は `images/pi/Dockerfile` に固定）。起動条件の例：
+pi は、agora のアダプタ `agora-pi`（`images/pi/agora-pi.mjs`）が pi の SDK で動かします。起動条件の例：
 
 ```json
 {"harness": "pi", "version": "1.5.2", "model": "claude-haiku-5-5"}
 ```
 
-- 何をどこに写すかは [docs/harness-adapters.md](docs/harness-adapters.md) にまとめています。
-- 指示・skill・`settings.json`・`mcp.json`・`models.json` を、セッション専用の pi の設定ディレクトリに置きます。HOME もセッションの中にします。
-- MCP のツール（agora のツールとモジュールの MCP）は、すべて最初からモデルに見せます（`exposure: "direct"`）。codemode は使いません。
-- LLM の接続先は `models.json` に書き、仮想キーは環境変数から読ませます。
-- `builtinTools: false` は `defaultTools: []` にします。自動の通信（`PI_OFFLINE`）、パッケージ、キャッシュの維持、統計の送信は切ります。
+- アダプタが守る要件は [docs/harness-adapters.md](docs/harness-adapters.md) にあります。
+- 会話は、agora が渡すもの（指示・skill・MCP サーバー・モデル・組み込みツールの有無）だけから作ります。pi の設定ファイル、skill、指示ファイル、拡張は探しません。
+- MCP のツール（agora のツールとモジュールの MCP）は、pi のツールとして最初からモデルに見せます。
+- 仮想キーはアダプタのプロセスだけが持ち、pi のツール（bash など）や MCP サーバーには渡しません。
+- 会話の再開（`session/load`）には対応していないので、pi のセッションは `clone` できません。
 
 ## OpenCode で動かす
 

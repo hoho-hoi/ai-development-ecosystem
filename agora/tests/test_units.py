@@ -10,8 +10,7 @@ from unittest import mock
 from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo
 
 from agora.acp_client import decide_permission
-from agora.harness import (finish_harness_config, harness_model_id, harness_record_dir, prepare_harness_config,
-                           resolve_definition)
+from agora.harness import harness_model_id, harness_record_dir, prepare_harness_config, resolve_definition
 from agora.logins import LoginError, load_chatgpt_login, write_access_only
 from agora.modules import ModuleCache, load_local
 from agora.spec import (BROKER_TOOLS, CLAUDE_BUILTINS, DEFAULT_STRIP, Catalog, HarnessOverride, ModuleSource,
@@ -225,7 +224,7 @@ class OpencodeHarnessTests(unittest.TestCase):
 
 
 class PiHarnessTests(unittest.TestCase):
-    def test_pi_config_is_isolated_and_built_from_the_module(self):
+    def test_pi_gets_the_module_alone_through_agora_pi(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             skill = t / "src-skill" / "hello"
@@ -233,64 +232,30 @@ class PiHarnessTests(unittest.TestCase):
             (skill / "SKILL.md").write_text("---\nname: hello\ndescription: x\n---\n")
             p = make_spec(t, runtime={"harness": "pi", "model": "claude-haiku-5-5"}, ext={"builtinTools": False})
             env = prepare_harness_config(p, t / "out", "/rt", "You are the role.", [skill])
-            agent = t / "out" / "pi" / "agent"
-            self.assertEqual((agent / "AGENTS.md").read_text(), "You are the role.")
-            self.assertTrue((agent / "skills" / "hello" / "SKILL.md").is_file())
-            st = json.loads((agent / "settings.json").read_text())
-            self.assertEqual((st["defaultProvider"], st["defaultModel"]), ("anthropic", "claude-haiku-5-5"))
-            self.assertEqual(st["defaultProjectTrust"], "never")
-            self.assertEqual(st["defaultTools"], [])  # builtinTools: false
-            self.assertEqual(st["packages"], [])
-            self.assertEqual(st["cacheWarming"], "off")
-            self.assertEqual(env["HOME"], "/rt/pi/home")
-            self.assertEqual(env["PI_CODING_AGENT_DIR"], "/rt/pi/agent")
-            self.assertEqual(env["PI_CODING_AGENT_SESSION_DIR"], "/rt/pi/sessions")
+            d = t / "out" / "pi"
+            self.assertEqual((d / "AGENTS.md").read_text(), "You are the role.")
+            self.assertTrue((d / "skills" / "hello" / "SKILL.md").is_file())
+            self.assertEqual(env["AGORA_INSTRUCTIONS_FILE"], "/rt/pi/AGENTS.md")
+            self.assertEqual(env["AGORA_SKILLS_DIR"], "/rt/pi/skills")
+            self.assertEqual(env["AGORA_PI_MODEL"], "anthropic/claude-haiku-5-5")
+            self.assertEqual(env["AGORA_BUILTIN_TOOLS"], "0")
             self.assertEqual(env["PI_OFFLINE"], "1")
-            # only the config is written: home and sessions are records a clone brings along
-            self.assertEqual(sorted(os.listdir(t / "out" / "pi")), ["agent"])
-            self.assertEqual(harness_record_dir(p), "pi")
+            self.assertEqual(p.runtime.adapter, ["agora-pi"])
             self.assertEqual(harness_model_id(p), "anthropic/claude-haiku-5-5")
-            self.assertEqual(p.runtime.adapter, ["pi-acp"])
+            self.assertEqual(harness_record_dir(p), "pi")
 
-    def test_pi_keeps_builtin_tools_by_default(self):
+    def test_pi_without_instructions_and_with_builtin_tools(self):
         with tempfile.TemporaryDirectory() as t:
-            p = make_spec(Path(t), runtime={"harness": "pi", "model": "claude-haiku-5-5"})
-            prepare_harness_config(p, Path(t) / "o", "/rt", None, [])
-            st = json.loads((Path(t) / "o/pi/agent/settings.json").read_text())
-            self.assertNotIn("defaultTools", st)
-            self.assertFalse((Path(t) / "o/pi/agent/AGENTS.md").exists())
+            p = make_spec(Path(t), runtime={"harness": "pi", "model": "openai/gpt-x"})
+            env = prepare_harness_config(p, Path(t) / "o", "/rt", None, [])
+            self.assertNotIn("AGORA_INSTRUCTIONS_FILE", env)
+            self.assertFalse((Path(t) / "o/pi/AGENTS.md").exists())
+            self.assertEqual(env["AGORA_BUILTIN_TOOLS"], "1")
+            self.assertEqual(env["AGORA_PI_MODEL"], "openai/gpt-x")
 
-    def test_pi_mcp_servers_are_declared_up_front_and_the_gateway_goes_in_models_json(self):
+    def test_other_harnesses_keep_the_module_model_name(self):
         with tempfile.TemporaryDirectory() as t:
-            p = make_spec(Path(t), runtime={"harness": "pi", "model": "claude-haiku-5-5"})
-            prepare_harness_config(p, Path(t) / "o", "/rt", None, [])
-            servers = [
-                {"name": "agora", "command": "python3", "args": ["/opt/agora/agora_bridge.py"],
-                 "env": [{"name": "AGORA_TOKEN", "value": "tok"}]},
-                {"name": "docs", "type": "http", "url": "https://x/mcp", "headers": [{"name": "A", "value": "b"}]},
-            ]
-            finish_harness_config(p, Path(t) / "o", servers, "http://gw:4000")
-            agent = Path(t) / "o/pi/agent"
-            mcp = json.loads((agent / "mcp.json").read_text())
-            self.assertFalse(mcp["autoEnableCodemode"])
-            self.assertEqual(mcp["mcpServers"]["agora"], {"exposure": "direct", "command": "python3",
-                             "args": ["/opt/agora/agora_bridge.py"], "env": {"AGORA_TOKEN": "tok"}})
-            self.assertEqual(mcp["mcpServers"]["docs"], {"exposure": "direct", "url": "https://x/mcp",
-                                                          "headers": {"A": "b"}})
-            models = json.loads((agent / "models.json").read_text())
-            # the key itself never enters a file
-            self.assertEqual(models, {"providers": {"anthropic": {"baseUrl": "http://gw:4000",
-                                                                  "apiKey": "$AGORA_LLM_KEY"}}})
-
-    def test_other_harnesses_need_no_finishing(self):
-        with tempfile.TemporaryDirectory() as t:
-            p = make_spec(Path(t))
-            prepare_harness_config(p, Path(t) / "o", "/rt", None, [])
-            before = sorted(str(x) for x in (Path(t) / "o").rglob("*"))
-            finish_harness_config(p, Path(t) / "o", [{"name": "agora", "command": "x"}], "http://gw")
-            self.assertEqual(before, sorted(str(x) for x in (Path(t) / "o").rglob("*")))
-            self.assertEqual(harness_model_id(p), "m")
-
+            self.assertEqual(harness_model_id(make_spec(Path(t))), "m")
 
 class ModuleTests(unittest.TestCase):
     def write(self, root: Path, files: dict[str, str]) -> Path:

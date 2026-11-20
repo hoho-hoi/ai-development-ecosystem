@@ -43,8 +43,7 @@ class RunHandle:
 
 class Runner(abc.ABC):
     name: str = "runner"
-    broker_url: str = ""  # broker URL as reachable from the agent
-    bridge_command: list[str] = []  # how the agent starts the broker's MCP bridge
+    broker_url: str = ""
 
     @abc.abstractmethod
     def runtime_paths(self, bundle: Path) -> tuple[str, str]:

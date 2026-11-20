@@ -63,7 +63,7 @@ HARNESSES: dict[str, dict[str, Any]] = {
     "claude-code": {"adapter": ["claude-agent-acp"], "version_arg": "CLAUDE_AGENT_ACP_VERSION"},
     "codex": {"adapter": ["codex-acp"], "version_arg": "CODEX_ACP_VERSION"},
     "opencode": {"adapter": ["opencode", "acp"], "version_arg": "OPENCODE_VERSION"},
-    "pi": {"adapter": ["pi-acp"], "version_arg": "PI_VERSION"},
+    "pi": {"adapter": ["agora-pi"], "version_arg": "PI_VERSION"},
 }
 
 # Claude Code tools turned off when a module has builtinTools: false.

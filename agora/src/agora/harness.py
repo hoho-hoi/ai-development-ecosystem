@@ -132,40 +132,21 @@ def prepare_harness_config(
             }
         )
     elif rt.harness == "pi":
-        # pi through pi-acp. Everything pi reads lives under this directory:
-        # the agent dir (instructions, skills, settings; models.json and
-        # mcp.json are added by finish_harness_config once the session's MCP
-        # servers and gateway are known), HOME (so no ~/.pi or ~/.agents from
-        # elsewhere; pi-acp keeps its session map there) and the session
-        # store. Only `agent` is written here: `home` and `sessions` are the
-        # harness's records, which a clone brings from its source.
+        # agora-pi (images/pi/agora-pi.mjs) builds each conversation with pi's
+        # SDK from these files and variables alone; it reads no pi settings,
+        # skills or instruction files of its own. MCP servers come over ACP.
         d = host_dir / "pi"
-        agent_dir = d / "agent"
-        (agent_dir / "skills").mkdir(parents=True)
-        if instructions is not None:
-            (agent_dir / "AGENTS.md").write_text(instructions, encoding="utf-8")
-        _copy_skills(skill_dirs, agent_dir / "skills")
-        provider, model_id = _pi_model(rt.model)
-        pi_settings: dict[str, object] = {
-            "defaultProvider": provider,
-            "defaultModel": model_id,
-            "defaultProjectTrust": "never",
-            "quietStartup": True,
-            "packages": [],
-            # pi-only behaviours agora does not use: keeping caches warm
-            # between runs (billed) and install telemetry.
-            "cacheWarming": "off",
-            "enableInstallTelemetry": False,
-        }
-        if not rt.builtin_tools:
-            pi_settings["defaultTools"] = []
-        (agent_dir / "settings.json").write_text(json.dumps(pi_settings, indent=2), encoding="utf-8")
+        (d / "skills").mkdir(parents=True)
+        _copy_skills(skill_dirs, d / "skills")
         root = f"{runtime_dir}/pi"
+        if instructions is not None:
+            (d / "AGENTS.md").write_text(instructions, encoding="utf-8")
+            env["AGORA_INSTRUCTIONS_FILE"] = f"{root}/AGENTS.md"
         env.update(
             {
-                "HOME": f"{root}/home",
-                "PI_CODING_AGENT_DIR": f"{root}/agent",
-                "PI_CODING_AGENT_SESSION_DIR": f"{root}/sessions",
+                "AGORA_PI_MODEL": harness_model_id(spec),
+                "AGORA_SKILLS_DIR": f"{root}/skills",
+                "AGORA_BUILTIN_TOOLS": "1" if rt.builtin_tools else "0",
                 "PI_OFFLINE": "1",
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
@@ -201,38 +182,6 @@ def harness_model_id(spec: Spec) -> str:
     return spec.runtime.model
 
 
-def finish_harness_config(
-    spec: Spec, host_dir: Path, mcp_servers: list[dict[str, object]], llm_url: str | None
-) -> None:
-    """Config that needs the running session: its MCP servers (agora's bridge
-    and the module's) and the gateway. Harnesses that take MCP servers over
-    ACP need nothing here."""
-    if spec.runtime.harness != "pi":
-        return
-    agent_dir = host_dir / "pi" / "agent"
-    # pi-acp does not pass ACP mcpServers on to pi, so they go into pi's own
-    # mcp.json. Every tool is declared to the model up front ("direct"), like
-    # built-in tools, rather than found later through codemode or tool search.
-    servers: dict[str, object] = {}
-    for m in mcp_servers:
-        entry: dict[str, object] = {"exposure": "direct"}
-        if "url" in m:
-            entry["url"] = m["url"]
-            entry["headers"] = {h["name"]: h["value"] for h in m.get("headers") or []}  # type: ignore[union-attr]
-        else:
-            entry["command"] = m["command"]
-            entry["args"] = list(m.get("args") or [])  # type: ignore[arg-type]
-            entry["env"] = {e["name"]: e["value"] for e in m.get("env") or []}  # type: ignore[union-attr]
-        servers[str(m["name"])] = entry
-    mcp = {"autoEnableCodemode": False, "mcpServers": servers}
-    (agent_dir / "mcp.json").write_text(json.dumps(mcp, indent=2), encoding="utf-8")
-    if llm_url:
-        provider, _ = _pi_model(spec.runtime.model)
-        # The key stays in the environment; pi reads it through "$NAME".
-        models = {"providers": {provider: {"baseUrl": llm_url, "apiKey": "$AGORA_LLM_KEY"}}}
-        (agent_dir / "models.json").write_text(json.dumps(models, indent=2), encoding="utf-8")
-
-
 @dataclass
 class Definition:
     """What the agent is: its module's instructions, skills and files."""
@@ -249,7 +198,7 @@ def resolve_definition(spec: Spec) -> Definition:
 
 
 # Files in a harness dir that hold credentials: never collected into history.
-CREDENTIAL_FILES = {"codex": ("auth.json",), "pi": ("mcp.json",)}  # pi: the bridge token
+CREDENTIAL_FILES = {"codex": ("auth.json",)}
 
 
 def harness_record_dir(spec: Spec) -> str:
