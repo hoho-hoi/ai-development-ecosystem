@@ -118,14 +118,16 @@ class AcpClient:
             "session/load", {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout
         )
 
-    async def prompt(self, session_id: str, text: str) -> tuple[str, str]:
-        """Run one prompt turn. Returns (stopReason, the text the agent wrote)."""
+    async def prompt(self, session_id: str, text: str, meta: dict[str, Any] | None = None) -> tuple[str, str]:
+        """Run one prompt turn. Returns (stopReason, the text the agent wrote).
+        `meta` goes in the request's _meta (e.g. the turn's traceparent)."""
         self._collect[session_id] = []
         self._cancelled.discard(session_id)
+        params: dict[str, Any] = {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}
+        if meta:
+            params["_meta"] = meta
         try:
-            result = await self.peer.request(
-                "session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}
-            )
+            result = await self.peer.request("session/prompt", params)
             return (result or {}).get("stopReason", "end_turn"), "".join(self._collect.get(session_id, []))
         finally:
             self._collect.pop(session_id, None)

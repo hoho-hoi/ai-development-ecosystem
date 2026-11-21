@@ -42,7 +42,8 @@ from .runner import Runner
 from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
 from .sessions import LIVE, BrokerError, Forbidden, NotFound, Session, SessionManager
-from .store import HistoryStore
+from .store import StateStore
+from .history import HistoryError, PhoenixHistory
 from .tools import HANDSHAKE_VERSIONS, INSTRUCTIONS, TOOL_SCHEMAS, render_notice
 
 log = logging.getLogger(__name__)
@@ -58,11 +59,11 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "list_sessions": ({"module", "state", "include_ended", "place"}, set()),
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
-    "history": ({"session", "thread_id", "since", "until", "kinds", "after_seq", "limit", "wait"}, set()),
+    "history": ({"sql"}, set()),
 }
 # Tools another place may call on behalf of one of its residents. send arrives
 # as /federation/deliver, and a mailbox is read only where it is kept.
-REMOTE_TOOLS = {"list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history"}
+REMOTE_TOOLS = {"list_modules", "spawn", "clone", "list_sessions", "status", "terminate"}
 
 
 assert set(BROKER_TOOLS) | {"whoami"} == set(TOOLS), "spec.BROKER_TOOLS and daemon.TOOLS disagree"
@@ -123,7 +124,11 @@ class Broker:
     def __init__(self, cfg: BrokerConfig, runner: Runner | None = None, telemetry: Telemetry | None = None):
         self.cfg = cfg
         self.key = ensure_broker_key(cfg)
-        self.store = HistoryStore(cfg.history_dir)
+        self.telemetry = telemetry or Telemetry(cfg.telemetry.otlp_endpoint if cfg.telemetry else None, cfg.place)
+        # agora keeps state only; its history goes to the trace store as telemetry.
+        self.store = StateStore(cfg.history_dir, sink=self.telemetry.record)
+        mcp_url = cfg.telemetry.phoenix_mcp_url if cfg.telemetry else None
+        self.history = PhoenixHistory(mcp_url) if mcp_url else None
         self.catalog = Catalog(cfg.modules, ModuleCache(cfg.state_dir / "modules"), cfg.base_dir,
                                network=cfg.network, harnesses=cfg.harnesses)
         stale = self.store.mark_stale_sessions(LIVE)
@@ -134,7 +139,6 @@ class Broker:
             load_or_create_key(cfg.place_key_file),
             [Peer(p.name, p.url, p.public_key) for p in cfg.peers],
         )
-        self.telemetry = telemetry or Telemetry(cfg.telemetry.otlp_endpoint if cfg.telemetry else None, cfg.place)
         self.manager = SessionManager(cfg, self.store, self.catalog, runner or make_runner(cfg), self.federation,
                                       self.telemetry)
 
@@ -230,12 +234,13 @@ class Broker:
             target = caller.id if args["session"] == "self" else args["session"]
             return await m.terminate(caller, target, args.get("reason"))
         if tool == "history":
-            # Thoughts are open: anyone may read anyone's history.
-            q = {k: v for k, v in args.items() if v is not None}
-            q.setdefault("limit", 1000)
-            if q.get("session") == "self":
-                q["session"] = caller.id
-            return {"place": m.place, "events": await m.history(**q)}
+            # Read-only SQL over this place's trace store; anyone's history is open.
+            if self.history is None:
+                raise BrokerError("this place has no trace store to read history from (telemetry.phoenix_mcp_url)")
+            try:
+                return await asyncio.to_thread(self.history.query, args.get("sql"))
+            except HistoryError as e:
+                raise BrokerError(str(e)) from None
         raise BrokerError(f"unknown tool {tool!r}")
 
     # --- HTTP handlers -------------------------------------------------------

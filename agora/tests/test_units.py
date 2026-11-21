@@ -16,7 +16,7 @@ from agora.modules import ModuleCache, load_local
 from agora.spec import (BROKER_TOOLS, CLAUDE_BUILTINS, DEFAULT_STRIP, Catalog, HarnessOverride, ModuleSource,
                         Network, Permissions, Workspace, load_module_dir, resolve)
 from agora.runner.docker import build_create_args, pack_bundle
-from agora.store import HistoryStore
+from agora.store import StateStore
 from agora.workspace import WorkspaceError, prepare_workspace
 
 
@@ -446,22 +446,21 @@ class PermissionTests(unittest.TestCase):
 
 
 class StoreTests(unittest.TestCase):
-    def test_jsonl_and_index_agree_and_secrets_redacted(self):
+    def test_events_go_to_the_sink_with_secrets_redacted(self):
         with tempfile.TemporaryDirectory() as t:
-            st = HistoryStore(t)
+            got = []
+            st = StateStore(t, sink=lambda *a: got.append(a))
             st.add_secret("TOKEN", "super-secret-value")
             st.record("x", session_id="s1", text="token=super-secret-value")
-            st.record("y", session_id="s2", n=1)
-            lines = [json.loads(l) for f in sorted((Path(t) / "events").glob("*.jsonl")) for l in f.read_text().splitlines()]
-            self.assertEqual([l["kind"] for l in lines], ["x", "y"])
-            self.assertEqual(lines[0]["payload"]["text"], "token=[REDACTED:TOKEN]")
-            self.assertEqual(st.events(session_id="s1")[0]["payload"], lines[0]["payload"])
-            self.assertNotIn("super-secret-value", "".join(f.read_text() for f in (Path(t) / "events").glob("*")))
+            st.record("y", session_id="s2", thread_id="t", message_id="m", n=1)
+            self.assertEqual(got, [("x", "s1", None, None, {"text": "token=[REDACTED:TOKEN]"}),
+                                   ("y", "s2", "t", "m", {"n": 1})])
+            self.assertFalse((Path(t) / "events").exists())  # no history of its own
             st.close()
 
     def test_stale_sessions_marked_lost(self):
         with tempfile.TemporaryDirectory() as t:
-            st = HistoryStore(t)
+            st = StateStore(t)
             base = {"name": "n", "kind": "managed", "depth": 1, "created_at": "2026-01-01", "meta": {}}
             st.upsert_session({**base, "id": "a", "state": "idle", "token_hash": "h1"})
             st.upsert_session({**base, "id": "b", "state": "terminated", "token_hash": "h2"})
@@ -472,7 +471,7 @@ class StoreTests(unittest.TestCase):
 
     def test_mailbox_filters(self):
         with tempfile.TemporaryDirectory() as t:
-            st = HistoryStore(t)
+            st = StateStore(t)
             row = {"to_id": "me", "thread_id": "t", "delivery": "mailbox"}
             st.insert_message({**row, "id": "m1", "ts": "2026-01-02", "from_id": "a", "reply_to": None, "body": "1"})
             st.insert_message({**row, "id": "m2", "ts": "2026-01-03", "from_id": "b", "reply_to": "m9", "body": "2"})
@@ -634,15 +633,11 @@ class IdentityTests(unittest.TestCase):
                        "idempotency_key TEXT, delivery TEXT NOT NULL, delivered_at TEXT)")
             db.commit()
             db.close()
-            st = HistoryStore(t)  # a v0.5 store gains the new columns
-            seen = []
-            st.listeners.append(lambda: seen.append(1))
+            st = StateStore(t)  # a v0.5 store gains the new columns
             st.insert_message({"id": "m1", "ts": "1", "from_id": "s-a@pc1", "from_name": "a", "to_id": "me",
                                "thread_id": "t", "reply_to": None, "body": "b", "delivery": "mailbox", "sig": "ab"})
             self.assertEqual((st.message("m1")["sig"], st.message("m1")["from_name"]), ("ab", "a"))
             self.assertEqual(st.unread_by_sender("me"), [("s-a@pc1", "a", 1)])
-            st.record("x")
-            self.assertEqual(seen, [1])
             st.close()
 
 

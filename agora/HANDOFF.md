@@ -37,6 +37,17 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.13.0（2026-11-22）：履歴は OpenTelemetry で Phoenix に、agora は状態だけ
+
+- 合意（全体像図 https://claude.ai/artifact/ENQia4VgaNUKAYT4mqj838）：
+  - agora は履歴を持たない。持つのは受信箱とセッションの表だけ。出来事（session.*、message.* など）は1件ずつ短いスパンにして OpenTelemetry で Phoenix に送る。ユーザーの言葉：「二重記録のように見える」。
+  - ACP のフレームとツール呼び出しのスパンはやめた（会話とツール呼び出しは LiteLLM の記録が正本）。終了時のハーネスの記録の回収もやめた（clone のための回収は残す）。
+  - `history` ツールは、agora が Phoenix の MCP にクライアントとしてつなぎ、読み取り専用の SQL（describeSqlSchema、executeSql）だけを中継する（`src/agora/history.py`、設定は `telemetry.phoenix_mcp_url`）。Phoenix 21.1 の MCP はツールを codemode 風に隠し、中に約130個（削除、ユーザーや API キーの管理、LLM の呼び出しを含む）を持つので、そのまま渡さない。ユーザーの言葉：「phoenixを使うのはagoraの決定のため、ユーザに直接phoenixに問い合わせさせるよりもagoraが中継するのが筋」。
+  - 人が見るのは Phoenix の画面。
+  - LiteLLM は `arize_phoenix` のコールバック（`LITELLM_OTEL_V2=true`、`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only`。既定では会話の中身を送らない）。
+- LLM の呼び出しをターンにつなぐ：agora が `session/prompt` の `_meta.traceparent` にターンの印を入れ、agora-pi が LLM へのリクエストのヘッダーに付ける。LiteLLM はそれを親にする。実 API で、caller → romaji の木の中に LLM の呼び出しが入ることを確認した。
+- 残っているノイズ：LiteLLM の DB 操作（`postgres.*`）と管理 API（`POST /key/generate`）のスパンも Phoenix に届く（`LITELLM_OTEL_EXCLUDED_SERVICES=postgres` でも認証時のものは残る）。`api.call`（agora が受けたツール呼び出し）は、LLM の記録と一部重なる。
+
 ## 2026-11-21：pi と Claude Code の比較（romaji の評価ケース 9 件 × 3 回、Haiku 5.5）
 
 | | 機械的な不合格 | 1 回（9 件）の費用 | 1 回の入力トークン | 呼び出し |

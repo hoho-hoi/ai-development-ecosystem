@@ -7,6 +7,8 @@ talk over HTTP exactly as two machines would.
 """
 
 import asyncio
+import http.server
+import threading
 import json
 import os
 import tempfile
@@ -65,10 +67,10 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["from"], st["address"])
 
         # pc2 gave the person the message with the sender's full address
-        inject = (await self.pc2.tool("history", session=st["id"], kinds=["message.inject"]))["events"][0]
+        inject = self.pc2.events(session=st["id"], kinds=["message.inject"])[0]
         self.assertTrue(inject["payload"]["text"].startswith("from: operator@pc1\n"), inject)
         # pc1 checked the reply's signature against the sender's key, which matches its id
-        arrive = self.pc1.broker.store.events(kinds=["message.arrive"])[0]["payload"]
+        arrive = self.pc1.events(kinds=["message.arrive"])[0]["payload"]
         self.assertEqual((arrive["sender"], arrive["place"]), (st["address"], "pc2"))
         self.assertEqual(session_id_for(bytes.fromhex(st["public_key"])), st["id"])
 
@@ -96,9 +98,9 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         sent = await self.pc1.tool("send", to=st["address"], body="FINAL_ONLY")
         self.assertEqual(sent["to"], st["address"])  # the sender just sees it arrive
         self.assertEqual([d.get("duplicate", False) for d in delivered], [False, True])
-        arrived = self.pc2.broker.store.events(kinds=["message.arrive"])
+        arrived = self.pc2.events(kinds=["message.arrive"])
         self.assertEqual([e["message_id"] for e in arrived], [sent["message_id"]])  # once
-        retry = self.pc1.broker.store.events(kinds=["message.retry"])
+        retry = self.pc1.events(kinds=["message.retry"])
         self.assertEqual(len(retry), 1)
 
         # a place that stays unreachable: the sender is told, after the retries
@@ -132,13 +134,11 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         result = json.loads(json.loads(r["body"])["content"][0]["text"])
         self.assertEqual(result["to"], b["address"])
         # b answered a (with send reply_to), and a's next turn got it
-        hist = (await self.pc1.tool("history", session=a["id"], kinds=["message.inject"], wait=20,
-                                     after_seq=0))["events"]
         deadline = time.monotonic() + 20
+        hist = self.pc1.events(session=a["id"], kinds=["message.inject"])
         while len(hist) < 2 and time.monotonic() < deadline:
-            last = hist[-1]["seq"]
-            hist += (await self.pc1.tool("history", session=a["id"], kinds=["message.inject"], after_seq=last,
-                                          wait=10))["events"]
+            await asyncio.sleep(0.2)
+            hist = self.pc1.events(session=a["id"], kinds=["message.inject"])
         self.assertTrue(hist[1]["payload"]["text"].startswith(f"from: echo ({b['address']})\n"), hist[1])
         self.assertTrue(hist[1]["payload"]["text"].endswith("\n\necho: hi b, this is a"))
 
@@ -154,7 +154,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["address"] for s in listed["sessions"]], [st["address"]])
         self.assertEqual((await self.pc1.tool("status", session=st["address"]))["state"], "idle")
         self.assertEqual((await self.pc1.tool("status", session="echo@pc2"))["id"], st["id"])
-        events = (await self.pc1.tool("history", session=st["address"]))["events"]
+        events = self.pc2.events(session=st["id"])  # each place sends its residents' history
         self.assertIn("session.spawn", [e["kind"] for e in events])
         done = await self.pc1.tool("terminate", session=st["address"], reason="from pc1")
         self.assertEqual(done["state"], "terminated")
@@ -311,8 +311,6 @@ class Clones(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory["memory"], ["apple"])
         self.assertEqual(memory["loaded"], [twin["acp_session_id"]])  # resumed with ACP session/load
         self.assertEqual(json.loads(await self.ask(twin["id"], "READ note.txt")), "written before the clone")
-        acp = (await self.b.tool("history", session=twin["id"], kinds=["acp.out"]))["events"]
-        self.assertEqual([e["payload"]["frame"].get("method") for e in acp][:2], ["initialize", "session/load"])
 
         # from here on they are two people
         await self.ask(src["id"], "REMEMBER banana")
@@ -322,7 +320,7 @@ class Clones(unittest.IsolatedAsyncioTestCase):
         await self.ask(twin["id"], "WRITE note.txt changed by the clone")
         self.assertEqual(json.loads(await self.ask(src["id"], "READ note.txt")), "written before the clone")
 
-        clone_ev = (await self.b.tool("history", session=twin["id"], kinds=["session.clone"]))["events"][0]
+        clone_ev = self.b.events(session=twin["id"], kinds=["session.clone"])[0]
         self.assertEqual(clone_ev["payload"]["source"], src["address"])
         # the clone got the source's records but its own config (instructions, settings)
         self.assertIn("You are the echo module.", await self.ask(twin["id"], "INSTRUCTIONS"))
@@ -357,30 +355,54 @@ class OpenHistory(unittest.IsolatedAsyncioTestCase):
         os.environ.pop("AGORA_TEST_SECRET", None)
         self._tmp.cleanup()
 
-    async def test_anyone_reads_anyone_and_can_follow_live(self):
-        a = await self.b.tool("spawn", module="echo", name="a")
-        b = await self.b.tool("spawn", module="echo", name="b")
-        # a reads b's thoughts although they never met and a did not start b
-        sent = await self.b.tool("send", to=a["id"], body=f'BRIDGE history {json.dumps({"session": b["id"]})}')
-        res = await self.b.tool("receive", **{"reply_to": sent["message_id"], "wait": 20})
-        events = json.loads(json.loads(res["messages"][0]["body"])["content"][0]["text"])["events"]
-        self.assertIn("session.spawn", [e["kind"] for e in events])
+    async def test_history_relays_read_only_sql_to_the_trace_store(self):
+        from agora.history import PhoenixHistory
 
-        # following b: a waiting read returns as soon as b does something
-        last = (await self.b.tool("history", session=b["id"]))["events"][-1]["seq"]
-        follow = asyncio.create_task(self.b.tool("history", session=b["id"], after_seq=last, wait=30))
-        await asyncio.sleep(0.5)
-        self.assertFalse(follow.done())
-        t0 = time.monotonic()
-        await self.b.tool("send", to=b["id"], body="think about this")
-        new = (await follow)["events"]
-        self.assertLess(time.monotonic() - t0, 10)
-        self.assertTrue(new and all(e["seq"] > last for e in new))
-        # with nothing new, a waiting read ends empty at its deadline
-        last = (await self.b.tool("history", session=a["id"]))["events"][-1]["seq"]
-        t0 = time.monotonic()
-        self.assertEqual((await self.b.tool("history", session=a["id"], after_seq=last, wait=1))["events"], [])
-        self.assertGreaterEqual(time.monotonic() - t0, 0.9)
+        # no trace store configured: history says so
+        code, body = await self.b.call("history", {})
+        self.assertEqual(code, 400)
+        self.assertIn("phoenix_mcp_url", body["error"])
+
+        calls = []
+
+        class Phoenix(http.server.BaseHTTPRequestHandler):
+            """Answers like Phoenix's /mcp: server-sent events, a session id."""
+
+            def do_POST(self):
+                frame = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "id" not in frame:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                if frame["method"] == "initialize":
+                    result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "phoenix"}}
+                else:
+                    calls.append((frame["params"]["name"], frame["params"]["arguments"], self.headers.get("Mcp-Session-Id")))
+                    out = "-- sqlite; tables: spans" if frame["params"]["name"] == "describeSqlSchema" else {"rows": [[1]]}
+                    result = {"content": [{"type": "text", "text": json.dumps(out)}], "isError": False}
+                data = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': frame['id'], 'result': result})}\n\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Mcp-Session-Id", "phx-1")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Phoenix)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.b.broker.history = PhoenixHistory(f"http://127.0.0.1:{server.server_address[1]}/mcp")
+
+        a = await self.b.tool("spawn", module="echo", name="a")
+        sent = await self.b.tool("send", to=a["id"], body="BRIDGE history {}")
+        res = await self.b.tool("receive", **{"reply_to": sent["message_id"], "wait": 20})
+        self.assertIn("tables: spans", json.loads(res["messages"][0]["body"])["content"][0]["text"])
+        rows = await self.b.tool("history", sql="select 1")
+        self.assertEqual(rows, {"rows": [[1]]})
+        self.assertEqual(calls, [("describeSqlSchema", {}, "phx-1"), ("executeSql", {"sql": "select 1"}, "phx-1")])
 
 
 if __name__ == "__main__":

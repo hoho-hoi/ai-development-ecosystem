@@ -8,7 +8,7 @@
 - **ハーネスの抽象化**：管理下セッションは ACP（Agent Client Protocol）で操作するので、ハーネスの違いはアダプタが吸収します。
 - **モジュール**：1つのエージェントを作るための情報を全部持つディレクトリです（形式は Agent Plugins の `plugin.json`）。指示・skill・MCP サーバーに加えて、どう起動するか（ハーネスとその版、モデル、使えるツール、上限、認証の参照）も `plugin.json` に書きます。agora は起動条件をすべてモジュールから読みます。
 - **再現性**：モジュールとワークスペースはコミット SHA で、ハーネスはモジュールが指定する版で固定し、実際に使ったイメージの ID・モデル・ファイルの hash を履歴に残します。CLAUDE.md・AGENTS.md・`.claude/` などプロジェクト側の設定は全階層から除去し、ホストの `~/.claude` や `~/.codex` も読ませません。
-- **実行履歴**：送信原文、セッションに実際に投入した文面、ACP の生のやりとりまで、追記専用で記録します。履歴は誰でも読め、動いている最中の人の考えも追いかけられます。
+- **実行履歴**：agora は履歴を自分では持たず、OpenTelemetry で場所のトレースの置き場（Phoenix）に送ります。LLM の呼び出しの中身は LLM ゲートウェイ（LiteLLM）から同じ置き場に届き、agora のターンの下に入ります。履歴は誰でも `history`（読み取り専用の SQL）で検索できます。
 
 状態は v0.9 です。設計は[仕様書](https://claude.ai/code/artifact/8941d9d5-a033-44a9-8457-579be8a8a514)にあります。末尾の「未実装・未確認」も読んでください。
 
@@ -18,7 +18,7 @@
             場所 pc1（agora daemon）                                場所 pc2（agora daemon）
 ┌──────────────────────────────────────┐   署名付き HTTP   ┌──────────────────────────────────────┐
 │ 住人の受信箱・SessionManager           │◀────────────────▶│ 住人の受信箱・SessionManager           │
-│ 履歴（JSONL + SQLite）・場所の鍵        │  /federation/*   │ 履歴（JSONL + SQLite）・場所の鍵        │
+│ 状態（SQLite）・場所の鍵                │  /federation/*   │ 状態（SQLite）・場所の鍵                │
 │ Runner（docker / local）              │                  │ Runner（docker / local）              │
 └──┬──────────────────────┬────────────┘                  └──┬───────────────────────────────────┘
    │ MCP over HTTP（/mcp）    │ ACP（＋MCP over HTTP）              │ ACP
@@ -30,7 +30,7 @@
 
 - **人（セッション）**：管理下セッション（場所がコンテナで起動する）、外部セッション（人が自分で起動した Claude Code などをつなぐ）、操作者（`agora` コマンドを使うあなた）の3種類です。全員が Ed25519 の鍵を持ち、id は公開鍵から作ります（`s-` + SHA-256 の先頭16桁）。秘密鍵は住んでいる場所が持ち、コンテナの中のエージェントには渡しません。
 - **住所**：`id@場所`。同じ場所の中なら id か名前だけで通じます。
-- **場所**：マシンごとの `agora daemon`。自分の住人の受信箱と履歴を持ち、話してよい場所（`peers`）を名前・URL・公開鍵で設定します。
+- **場所**：マシンごとの `agora daemon`。自分の住人の受信箱と状態を持ち、話してよい場所（`peers`）を名前・URL・公開鍵で設定します。
 - 場所はそのまま MCP サーバーです（`http://<場所>/mcp`、Streamable HTTP）。セッションは全員、ここで自分の場所のツールを使います。管理下セッションには、場所が URL と自分のトークン（`Authorization: Bearer`）を渡します。使えるツールは、場所がトークンから決めます。
 
 ## 通信モデル
@@ -144,16 +144,29 @@ agora call receive '{"from": "s-…@pc2", "reply_to": "m-…", "wait": 600}' --c
 - モジュールの起動条件に認証を書く必要はなくなります。
 - LiteLLM の設定（モデルの一覧、本物のキー、データベース）は LiteLLM 側で行います。
 
-## トレース（OpenTelemetry）
+## 履歴（OpenTelemetry と Phoenix）
 
-`agora.yaml` に `telemetry.otlp_endpoint` を書くと、セッションのトレースを OTLP/HTTP で送ります。閲覧は Phoenix など OTLP を受けるものなら何でも構いません。追記専用の履歴は今のまま残り、トレースは閲覧用です。
+agora は履歴を自分では持ちません。持つのは動くための状態（受信箱とセッションの表）だけで、履歴はすべて OpenTelemetry のトレースとして、場所のトレースの置き場に送ります。置き場は Phoenix です。`agora.yaml` の `telemetry` に書きます。
+
+```yaml
+telemetry:
+  otlp_endpoint: http://127.0.0.1:6006/v1/traces   # トレースの送り先
+  phoenix_mcp_url: http://127.0.0.1:6006/mcp       # history ツールが中継する Phoenix の MCP
+```
 
 | スパン | 内容 |
 | --- | --- |
 | `invoke_agent <モジュール>` | 1セッション。spawn されたセッションは、起動したセッションの子になる（1本の木）。属性：`gen_ai.agent.name`、`gen_ai.request.model`、版、fingerprint、ハーネス |
-| `turn` | 1ターン（届いたメッセージ1通の処理）。message_id、終了理由 |
-| `execute_tool <名前>` | ACP のツール呼び出し1回 |
-| イベント `send` | セッションが送ったメッセージ（宛先、message_id） |
+| `turn` | 1ターン。渡した文面（`input.value`）と、エージェントが最後に書いた文章（`output.value`。誰にも届けていない） |
+| LLM の呼び出し | LiteLLM が送るもの。指示・会話・ツール呼び出し・トークン・費用。ハーネスがターンの `traceparent` を付けて呼ぶので、ターンの子になる |
+| 出来事（`message.send`、`session.spawn` など） | 1件ずつ短いスパン。中身は `agora.payload`（JSON） |
+
+すべてのスパンに `session.id`（セッションの id）が付きます。
+
+- **LLM の呼び出しをターンにつなぐ**：agora は ACP の `session/prompt` の `_meta.traceparent` にターンの印を入れます。アダプタはそれを LLM へのリクエストのヘッダーに付けます（agora-pi は対応済み）。LiteLLM は `arize_phoenix` のコールバックで Phoenix に送ります（`LITELLM_OTEL_V2=true`、会話の中身を送るには `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only`）。
+- **人が見る**：Phoenix の画面で、セッションの木、ターン、LLM の呼び出しの中身を見られます。
+- **エージェントが検索する**：`history` ツールです。agora が Phoenix の MCP にクライアントとしてつなぎ、読み取り専用の SQL のツール（`describeSqlSchema`、`executeSql`）だけを中継します。Phoenix のほかのツール（削除や LLM の呼び出しを含む）は渡しません。
+- **秘密**：セッションのトークンと、モジュールが `${VAR}` で参照した秘密情報の値は、送る前に `[REDACTED:…]` に置き換えます。
 
 ## クローン
 
@@ -319,31 +332,27 @@ http_headers = { Authorization = "Bearer <broker.key の中身>" }
 | `list_modules` | 登録されたモジュールの一覧（id、説明、版、起動条件）と、ほかに知っている場所。`place` で別の場所に聞く |
 | `list_sessions` / `status` | 一覧と状態（未読の数、直近のターンで書いた文章、経過時間、使用量）。`place`・`id@場所` で別の場所 |
 | `terminate` | 自分が起動したセッション（または自分）を終了。記録を回収してからコンテナを破棄 |
-| `history` | 誰の実行履歴でも原文のまま取り出す。`wait` で新しい記録が出るまで待てる |
+| `history` | 誰の実行履歴でも、読み取り専用の SQL で検索する。`sql` を省くと、使える表と SQL の方言を返す |
 
 操作者（鍵の持ち主）は `agora call <tool> '<json>'` で同じツールを呼べます。
 
 ```sh
 agora call spawn '{"module": "reviewer", "task": "src/ の変更をレビューして"}' --config agora.yaml
 agora call receive '{"from": "reviewer", "reply_to": "<task_message_id>", "wait": 600}' --config agora.yaml
-agora call history '{"session": "reviewer"}' --config agora.yaml
-agora call history '{"session": "s-…@pc2", "after_seq": 120, "wait": 60}' --config agora.yaml   # 動いている人を追う
+agora call history '{}' --config agora.yaml                                        # 表と方言
+agora call history '{"sql": "select name, start_time from spans order by start_time desc limit 20"}' --config agora.yaml
 ```
 
 ## 実行履歴
 
-`<state_dir>/history/` に保存します。
+履歴は Phoenix にあります（上の「履歴（OpenTelemetry と Phoenix）」）。agora が `<state_dir>/history/` に置くのは、次の2つだけです。
 
-- `events/YYYY-MM-DD.jsonl`：全イベントを 1 行 1 JSON で追記（要約・切り詰めなし）
-- `index.sqlite3`：検索用の索引と、セッション・メッセージの表
-- `sessions/<id>/harness/`：終了時にコンテナから回収した、ハーネス自身のセッション記録
+- `index.sqlite3`：セッションとメッセージ（受信箱）の表
 - `sessions/<id>/agent.stderr.log`：アダプタの標準エラー
 
-履歴はその人が住む場所にあります。別の場所の人の履歴は、`history` に `id@場所` を渡せばその場所から取り出します。
+主な出来事：`session.spawn`（解決した起動条件の全文と fingerprint、公開鍵）、`session.process`（使ったイメージの ID）、`session.module`（モジュールの取得元とファイルの hash）、`session.model`（確かめたモデル）、`session.clone`、`session.workspace`、`message.send`（送信原文と署名）、`message.arrive`、`message.deliver`（取り出し方）、`message.inject`（実際に渡した文面）、`acp.permission`、`turn.end`、`federation.call`、`session.end`
 
-主なイベント：`session.spawn`（解決した起動条件の全文と fingerprint、公開鍵）、`session.process`（使ったイメージの ID）、`session.module`（モジュールの取得元とファイルの hash）、`session.model`（確かめたモデル）、`session.clone`（元の人と、引き継いだ会話）、`session.workspace`（コミットと除去したパス）、`message.send`（送信原文と署名）、`message.arrive`（別の場所から届いたもの）、`message.deliver`（取り出し方：`turn` / `receive` / `dropped`）、`message.inject`（実際に渡した文面）、`acp.out` / `acp.in`（ACP のフレームそのまま）、`acp.permission`、`turn.end`（そのターンでエージェントが書いた文章。誰にも届けていない）、`federation.call`（別の場所から呼ばれたツール）、`session.end`
-
-**考えは開かれている**：操作者も、どのセッションも、誰の履歴でも読めます（信頼している場所の住人も同じ）。セッションのトークンと、モジュールが `${VAR}` で参照した秘密情報の値は、書き込む前に `[REDACTED:…]` に置き換えます。それ以外で履歴に残したくないものは、そもそもエージェントに渡さないでください。
+**考えは開かれている**：操作者も、どのセッションも（`history` を持つモジュールなら）、誰の履歴でも読めます。履歴に残したくないものは、そもそもエージェントに渡さないでください。
 
 ## セキュリティ
 

@@ -70,7 +70,7 @@ from .gateway import HARNESS_ENV, Gateway
 from .spec import BROKER_TOOLS, Catalog, Spec, Workspace
 from .telemetry import Telemetry
 from .runner import RunHandle, Runner
-from .store import HistoryStore, now
+from .store import StateStore, now
 from .workspace import prepare_workspace
 
 log = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ class SessionManager:
     def __init__(
         self,
         cfg: BrokerConfig,
-        store: HistoryStore,
+        store: StateStore,
         catalog: Catalog,
         runner: Runner,
         federation: Federation,
@@ -213,8 +213,6 @@ class SessionManager:
         self._lock = asyncio.Lock()
         self.modules = ModuleCache(cfg.state_dir / "modules")
         self._state_changed = asyncio.Event()  # replaced on every state change
-        self._history_changed = asyncio.Event()  # replaced on every recorded event
-        store.listeners.append(self._history_recorded)
         # The operator signs with the place's own key: the place vouches for it.
         self.operator = self._add(
             Session(
@@ -282,10 +280,6 @@ class SessionManager:
             s.ready.set()
             self._wake_watchers(s)
         changed, self._state_changed = self._state_changed, asyncio.Event()
-        changed.set()
-
-    def _history_recorded(self) -> None:
-        changed, self._history_changed = self._history_changed, asyncio.Event()
         changed.set()
 
     def _wake_watchers(self, s: Session) -> None:
@@ -615,14 +609,10 @@ class SessionManager:
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
 
-            def tap(direction: str, frame: dict[str, Any]) -> None:
-                self.store.record(f"acp.{direction}", session_id=s.id, frame=frame)
-
             def on_update(params: dict[str, Any]) -> None:
                 upd = params.get("update") or {}
                 if upd.get("sessionUpdate") == "usage_update":
                     s.usage = upd
-                self.telemetry.acp_update(s.id, upd)
 
             def on_permission(params: dict[str, Any], outcome: dict[str, Any]) -> None:
                 self.store.record("acp.permission", session_id=s.id, request=params, outcome=outcome)
@@ -631,7 +621,6 @@ class SessionManager:
                 s.handle.reader,
                 s.handle.writer,
                 permissions=spec.runtime.permissions,
-                tap=tap,
                 on_update=on_update,
                 on_permission=on_permission,
             )
@@ -730,10 +719,13 @@ class SessionManager:
             if s.spec.runtime.session_mode == "per_message" and s.turns > 0:
                 await self._fresh_conversation(s)
             s.turns += 1
-            self.telemetry.turn_start(s.id, {"agora.message_id": msg["id"], "agora.thread_id": msg["thread_id"],
-                                             "agora.from": msg.get("from_id") or msg.get("from")})
-            stop_reason, agent_text = await s.acp.prompt(s.acp_session_id, text)
-            self.telemetry.turn_end(s.id, {"agora.stop_reason": stop_reason})
+            self.telemetry.turn_start(s.id, text, {"agora.message_id": msg["id"], "agora.thread_id": msg["thread_id"],
+                                                   "agora.from": msg.get("from_id") or msg.get("from")})
+            # The turn's traceparent goes with the prompt, for the harness to send
+            # with its LLM calls so that they nest under this turn.
+            tp = self.telemetry.traceparent(s.id)
+            stop_reason, agent_text = await s.acp.prompt(s.acp_session_id, text, meta={"traceparent": tp} if tp else None)
+            self.telemetry.turn_end(s.id, agent_text, {"agora.stop_reason": stop_reason})
         except (ConnectionClosed, RpcError) as e:
             self.store.record("session.error", session_id=s.id, stage="prompt", error=repr(e))
             await self._finalize(s, "failed", f"prompt failed: {e}")
@@ -803,8 +795,6 @@ class SessionManager:
                 "message.send", session_id=caller.id, thread_id=thread_id, message_id=env["id"],
                 to=env["to"], body=body, reply_to=reply_to, sig=env["sig"],
             )
-            self.telemetry.event(caller.id, "send", {"agora.to": env["to"], "agora.message_id": env["id"],
-                                                     "agora.thread_id": thread_id, "agora.reply_to": reply_to})
             return result
         env = self._envelope(caller, f"{ref}@{place}", body, thread_id, reply_to)
         res = await self._deliver_remote(place, env)
@@ -1063,27 +1053,6 @@ class SessionManager:
         )
         return info
 
-    async def history(self, wait: float = 0, **query: Any) -> list[dict[str, Any]]:
-        """Anyone may read anyone's history (thoughts are open). With `wait`,
-        block (max 600 s) until there is something new to return."""
-        if query.get("session"):
-            query["session_id"] = self.resolve(query.pop("session"), live_only=False).id
-        else:
-            query.pop("session", None)
-        wait = max(0.0, min(float(wait or 0), 600.0))
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + wait
-        while True:
-            changed = self._history_changed
-            events = self.store.events(**query)
-            remaining = deadline - loop.time()
-            if events or remaining <= 0:
-                return events
-            try:
-                await asyncio.wait_for(changed.wait(), remaining)
-            except asyncio.TimeoutError:
-                return self.store.events(**query)
-
     # --- death ------------------------------------------------------------
     async def terminate(self, caller: Session, ref: str, reason: str | None = None) -> dict[str, Any]:
         s = self.resolve(ref, live_only=False)
@@ -1129,13 +1098,6 @@ class SessionManager:
                     pass
             if s.handle:
                 await self.runner.stop(s.handle)
-                assert s.spec is not None
-                dest = self.cfg.history_dir / "sessions" / s.id / "harness"
-                ok = await self.runner.collect(s.handle, harness_record_dir(s.spec), dest)
-                for name in CREDENTIAL_FILES.get(s.spec.runtime.harness, ()):
-                    for f in dest.rglob(name) if dest.exists() else ():
-                        f.unlink()  # credentials never go into the history
-                self.store.record("session.harness_records", session_id=s.id, collected=ok, path=str(dest))
                 await self.runner.destroy(s.handle)
             elif s.spec is not None and not self.cfg.keep_bundles:
                 shutil.rmtree(self.cfg.state_dir / "bundles" / s.id, ignore_errors=True)

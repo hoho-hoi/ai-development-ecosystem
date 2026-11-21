@@ -30,7 +30,7 @@ modules:
 # machines to reach it, listen_host must not be loopback only.
 # public_url: http://pc1.tailnet.example:8765
 
-# state_dir: ~/.local/state/agora   # history, bundles, module cache, the broker key and the place key
+# state_dir: ~/.local/state/agora   # session/message state, bundles, module cache, the broker key and the place key
 
 listen_host: 127.0.0.1   # 0.0.0.0 (or a VPN address) when other places must reach this one
 listen_port: 8765
@@ -65,9 +65,10 @@ docker:
 #   session_url: http://172.18.0.1:4000     # as sessions reach it (default: url)
 #   master_key_env: LITELLM_MASTER_KEY      # environment variable with the gateway's master key
 
-# Session traces over OTLP/HTTP (OpenTelemetry), e.g. to Phoenix.
+# History: agora keeps none itself and sends it as OpenTelemetry traces to Phoenix.
 # telemetry:
-#   otlp_endpoint: http://127.0.0.1:6006/v1/traces
+#   otlp_endpoint: http://127.0.0.1:6006/v1/traces   # OTLP/HTTP traces
+#   phoenix_mcp_url: http://127.0.0.1:6006/mcp       # the history tool relays Phoenix's read-only SQL
 
 # Global caps.
 max_sessions: 8          # live managed sessions

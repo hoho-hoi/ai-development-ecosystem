@@ -51,12 +51,12 @@
 
 - `initialize`
 - `session/new`：MCP サーバーの一覧を受け取る。今のモデルを報告する
-- `session/prompt`：返答の終わりを返す
-- `session/update`：返答の文章と、ツール呼び出しを送る
+- `session/prompt`：返答の終わりを返す。`_meta.traceparent` があれば、そのターンの LLM へのリクエストすべてに `traceparent` ヘッダーとして付ける（LLM の呼び出しが agora のターンの下に入る）
+- `session/update`：返答の文章を送る
 - `session/cancel`、`session/close`
 - `session/set_config_option`：モデル
 
-記録（会話の全文、使用量、費用、実際に使われたモデル）は LiteLLM から取るので、アダプタには求めません。
+記録（会話の全文、ツール呼び出し、使用量、費用、実際に使われたモデル）は LiteLLM から取るので、アダプタには求めません。
 
 ### D. 版
 

@@ -1,9 +1,8 @@
-"""Execution history and broker state.
+"""The state a place runs on: the session and message tables (SQLite).
 
-Every event is appended, unabridged, to a JSON-lines file per day
-(events/YYYY-MM-DD.jsonl); SQLite holds a searchable index of the same events
-plus the session and message tables. The JSONL files are the record of truth
-and are never rewritten.
+agora keeps no history of its own. record() hands each event, with secrets
+redacted, to a sink: the telemetry, which sends it to the place's trace
+store (see telemetry.py).
 
 The message table is also every resident's mailbox: a message is unread until
 delivered_at is set, either when it starts a turn ("turn") or when the
@@ -23,19 +22,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    session_id TEXT,
-    thread_id TEXT,
-    message_id TEXT,
-    payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS events_session ON events(session_id, seq);
-CREATE INDEX IF NOT EXISTS events_thread ON events(thread_id, seq);
-CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
-
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -75,10 +61,11 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-class HistoryStore:
-    def __init__(self, root: str | Path):
+class StateStore:
+    def __init__(self, root: str | Path, sink: Callable[..., None] | None = None):
         self.root = Path(root)
-        (self.root / "events").mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.sink = sink  # (kind, session_id, thread_id, message_id, payload) -> None
         self._lock = threading.RLock()
         self.db = sqlite3.connect(self.root / "index.sqlite3", check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -86,7 +73,6 @@ class HistoryStore:
         self.db.executescript(SCHEMA)
         self._migrate()
         self._secrets: dict[str, str] = {}
-        self.listeners: list[Callable[[], None]] = []  # called after every recorded event
 
     def _migrate(self) -> None:
         """Columns added after the first release."""
@@ -103,7 +89,7 @@ class HistoryStore:
     # --- redaction -------------------------------------------------------
     def add_secret(self, name: str, value: str) -> None:
         """Values registered here are replaced by [REDACTED:<name>] before any
-        event reaches disk."""
+        event leaves agora."""
         if value and len(value) >= 6:
             self._secrets[value] = name
 
@@ -122,72 +108,12 @@ class HistoryStore:
         thread_id: str | None = None,
         message_id: str | None = None,
         **payload: Any,
-    ) -> int:
-        ts = now()
-        body = self._redact(json.dumps(payload, ensure_ascii=False, default=str))
-        with self._lock:
-            cur = self.db.execute(
-                "INSERT INTO events(ts, kind, session_id, thread_id, message_id, payload) VALUES (?,?,?,?,?,?)",
-                (ts, kind, session_id, thread_id, message_id, body),
-            )
-            seq = int(cur.lastrowid)
-            line = json.dumps(
-                {
-                    "seq": seq,
-                    "ts": ts,
-                    "kind": kind,
-                    "session_id": session_id,
-                    "thread_id": thread_id,
-                    "message_id": message_id,
-                    "payload": json.loads(body),
-                },
-                ensure_ascii=False,
-            )
-            with open(self.root / "events" / f"{ts[:10]}.jsonl", "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        for listener in self.listeners:
-            listener()
-        return seq
-
-    def events(
-        self,
-        *,
-        session_id: str | None = None,
-        thread_id: str | None = None,
-        since: str | None = None,
-        until: str | None = None,
-        kinds: Iterable[str] | None = None,
-        after_seq: int | None = None,
-        limit: int = 1000,
-    ) -> list[dict[str, Any]]:
-        where, args = [], []
-        if session_id:
-            where.append("session_id = ?")
-            args.append(session_id)
-        if thread_id:
-            where.append("thread_id = ?")
-            args.append(thread_id)
-        if since:
-            where.append("ts >= ?")
-            args.append(since)
-        if until:
-            where.append("ts < ?")
-            args.append(until)
-        kinds = list(kinds or [])
-        if kinds:
-            where.append(f"kind IN ({','.join('?' * len(kinds))})")
-            args.extend(kinds)
-        if after_seq is not None:
-            where.append("seq > ?")
-            args.append(after_seq)
-        sql = "SELECT * FROM events"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY seq LIMIT ?"
-        args.append(limit)
-        with self._lock:
-            rows = self.db.execute(sql, args).fetchall()
-        return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
+    ) -> None:
+        """Hand one event to the sink (the trace store), secrets redacted."""
+        if self.sink is None:
+            return
+        body = json.loads(self._redact(json.dumps(payload, ensure_ascii=False, default=str)))
+        self.sink(kind, session_id, thread_id, message_id, body)
 
     # --- sessions -----------------------------------------------------------
     def upsert_session(self, row: dict[str, Any]) -> None:

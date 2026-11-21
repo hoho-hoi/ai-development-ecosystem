@@ -39,6 +39,9 @@ class GatewaySettings(BaseModel):
 class TelemetrySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     otlp_endpoint: str  # OTLP/HTTP traces endpoint, e.g. http://127.0.0.1:6006/v1/traces
+    # Phoenix's MCP endpoint, e.g. http://127.0.0.1:6006/mcp. The history tool
+    # relays its read-only SQL tools (and nothing else) to sessions.
+    phoenix_mcp_url: str | None = None
 
 
 class PeerSettings(BaseModel):

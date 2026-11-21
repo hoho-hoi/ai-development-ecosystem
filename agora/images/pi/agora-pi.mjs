@@ -52,7 +52,10 @@ delete env.AGORA_LLM_KEY;
 const stateDir = mkdtempSync(join(tmpdir(), "agora-pi-"));
 const modelRuntime = await ModelRuntime.create({ authPath: join(stateDir, "auth.json"), modelsPath: null });
 let model = modelRuntime.getModel(provider, modelId);
-if (model && llmUrl) model = { ...model, baseUrl: llmUrl };
+// Request headers of every LLM call. agora gives each turn a traceparent, so
+// the gateway's record of the call nests under that turn.
+const llmHeaders = {};
+if (model) model = { ...model, ...(llmUrl ? { baseUrl: llmUrl } : {}), headers: Object.assign(llmHeaders, model.headers) };
 if (llmKey) await modelRuntime.setRuntimeApiKey(provider, llmKey);
 
 const agentsFiles = instructionsFile ? [{ path: instructionsFile, content: readFileSync(instructionsFile, "utf8") }] : [];
@@ -256,6 +259,9 @@ const handlers = {
 			.filter((b) => b.type === "text")
 			.map((b) => b.text)
 			.join("\n");
+		const traceparent = params._meta?.traceparent;
+		if (typeof traceparent === "string") llmHeaders.traceparent = traceparent;
+		else delete llmHeaders.traceparent;
 		let aborted = false;
 		const off = session.subscribe((e) => {
 			if (e.type === "agent_settled") aborted = e.aborted;

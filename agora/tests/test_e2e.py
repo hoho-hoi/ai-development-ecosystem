@@ -59,12 +59,16 @@ class BrokerCase(unittest.IsolatedAsyncioTestCase):
         return sent, await self.reply_to(sent["message_id"], token, wait, sender=sent["to"])
 
     def first_message_id(self, session_id):
-        ev = self.b.broker.store.events(session_id="operator", kinds=["message.send"])
+        ev = self.b.events(session="operator", kinds=["message.send"])
         return [e for e in ev if e["payload"]["to"] == self.b.address(session_id)][0]["message_id"]
 
     async def turn_text(self, sid, message_id):
-        ev = (await self.b.tool("history", session=sid, kinds=["turn.end"]))["events"]
-        return next(e["payload"]["text"] for e in ev if e["message_id"] == message_id)
+        for _ in range(100):
+            ev = [e for e in self.b.events(session=sid, kinds=["turn.end"]) if e["message_id"] == message_id]
+            if ev:
+                return ev[0]["payload"]["text"]
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"no turn.end for {message_id}")
 
 
 class LifecycleTests(BrokerCase):
@@ -79,7 +83,11 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(st["address"], f"{sid}@pc1")
 
         # history: raw bodies, the exact injected text, the turn's text, ACP frames
-        hist = (await self.b.tool("history", thread_id=reply["thread_id"]))["events"]
+        for _ in range(50):  # the turn ends just after the reply is sent
+            hist = self.b.events(thread_id=reply["thread_id"])
+            if "turn.end" in [e["kind"] for e in hist]:
+                break
+            await asyncio.sleep(0.1)
         kinds = [e["kind"] for e in hist]
         for k in ("message.send", "message.inject", "turn.end", "message.deliver"):
             self.assertIn(k, kinds)
@@ -91,23 +99,19 @@ class LifecycleTests(BrokerCase):
         self.assertEqual([e["payload"]["via"] for e in hist if e["kind"] == "message.deliver"], ["turn", "receive"])
         sends = [e for e in hist if e["kind"] == "message.send"]
         self.assertEqual([e["session_id"] for e in sends], ["operator", sid])  # nothing written by the broker
-        acp = (await self.b.tool("history", session=sid, kinds=["acp.out"]))["events"]
-        methods = [e["payload"]["frame"].get("method") for e in acp]
-        self.assertEqual(methods[:3], ["initialize", "session/new", "session/prompt"])
-        spawn_ev = (await self.b.tool("history", session=sid, kinds=["session.spawn"]))["events"][0]
+        self.assertEqual(self.b.events(session=sid, kinds=["acp.out", "acp.in"]), [])  # the harness's own report is not kept
+        spawn_ev = self.b.events(session=sid, kinds=["session.spawn"])[0]
         self.assertEqual(spawn_ev["payload"]["spec"]["module"], "echo")
         self.assertTrue(spawn_ev["payload"]["fingerprint"].startswith("sha256:"))
 
-        # tokens and declared secrets never reach disk
-        everything = "".join(f.read_text() for f in (self.b.cfg.history_dir / "events").glob("*.jsonl"))
+        # tokens never leave agora in its history
+        everything = json.dumps([dict(sp.attributes or {}) for sp in self.b.spans.get_finished_spans()])
         session = self.b.broker.manager.sessions[sid]
         self.assertNotIn(session.token, everything)
-        self.assertIn("[REDACTED:token:", everything)
 
         done = await self.b.tool("terminate", session=sid, reason="test over")
         self.assertEqual(done["state"], "terminated")
-        transcript = self.b.cfg.history_dir / "sessions" / sid / "harness" / "projects" / "transcript.jsonl"
-        self.assertTrue(transcript.is_file(), "harness records were not collected")
+        self.assertFalse((self.b.cfg.history_dir / "sessions" / sid / "harness").exists())  # no records of its own
         self.assertFalse((self.b.cfg.state_dir / "bundles" / sid).exists(), "bundle not removed")
         listed = (await self.b.tool("list_sessions"))["sessions"]
         self.assertNotIn(sid, [s["id"] for s in listed])
@@ -184,7 +188,7 @@ class LifecycleTests(BrokerCase):
         self.assertEqual((answer["to"], answer["thread_id"]), (st["address"], question["thread_id"]))
         echo = await self.reply_to(answer["message_id"], sender=st["id"])
         self.assertEqual(echo["body"], "echo: my answer")
-        inject = (await self.b.tool("history", session=st["id"], kinds=["message.inject"]))["events"][-1]
+        inject = self.b.events(session=st["id"], kinds=["message.inject"])[-1]
         self.assertIn(f"in_reply_to: {question['message_id']}", inject["payload"]["text"])
         # a reply needs a message that was addressed to you
         code, body = await self.b.call("send", {"reply_to": answer["message_id"], "body": "x"})
@@ -213,7 +217,7 @@ class LifecycleTests(BrokerCase):
         result = json.loads((await self.reply_to(first["message_id"], sender=st["id"]))["body"])
         got = json.loads(result["content"][0]["text"])["messages"]
         self.assertEqual([m["message_id"] for m in got], [later["message_id"]])
-        deliver = (await self.b.tool("history", session=st["id"], kinds=["message.deliver"]))["events"]
+        deliver = self.b.events(session=st["id"], kinds=["message.deliver"])
         self.assertEqual({e["message_id"]: e["payload"]["via"] for e in deliver}[later["message_id"]], "receive")
         # taken mid-turn, so it started no turn of its own and nothing answers it
         r = await self.b.tool("receive", **{"from": st["id"], "reply_to": later["message_id"], "wait": 10})
@@ -225,7 +229,7 @@ class LifecycleTests(BrokerCase):
         await asyncio.sleep(0.2)
         waiting = await self.b.tool("send", to=st["id"], body="never read")
         await self.b.tool("terminate", session=st["id"], reason="stop now")
-        dropped = (await self.b.tool("history", session=st["id"], kinds=["message.dropped"]))["events"]
+        dropped = self.b.events(session=st["id"], kinds=["message.dropped"])
         self.assertEqual([e["message_id"] for e in dropped], [waiting["message_id"]])
         self.assertEqual((await self.b.tool("receive"))["messages"], [])  # the broker sends nobody anything
         code, _ = await self.b.call("send", {"to": st["id"], "body": "too late"})
@@ -254,7 +258,7 @@ class LifecycleTests(BrokerCase):
         _, ok2 = await self.ask(st["id"], "PERMISSION execute")
         self.assertEqual(json.loads(ok["body"])["outcome"]["optionId"], "allow-once")
         self.assertEqual(json.loads(ok2["body"])["outcome"]["optionId"], "allow-once")
-        perms = (await self.b.tool("history", session=st["id"], kinds=["acp.permission"]))["events"]
+        perms = self.b.events(session=st["id"], kinds=["acp.permission"])
         self.assertEqual(len(perms), 2)
         # ...unless the module turned the harness's built-in tools off
         st = await self.b.tool("spawn", module="mod", wait=True)
@@ -319,7 +323,7 @@ class ModuleRunTests(BrokerCase):
         self.assertIn("not among this session's tools", body["error"])
 
         # module source and file hashes are in the history
-        mod = (await self.b.tool("history", session=sid, kinds=["session.module"]))["events"][0]["payload"]
+        mod = self.b.events(session=sid, kinds=["session.module"])[0]["payload"]
         self.assertEqual(mod["plugin"]["name"], "mod")
         self.assertIn("io.github.hoho-hoi.agora/AGENTS.md", mod["files"])
 
@@ -329,12 +333,12 @@ class ModuleRunTests(BrokerCase):
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "MODEL")
         self.assertEqual(json.loads(r["body"]), "test-model-1")
-        ev = (await self.b.tool("history", session=st["id"], kinds=["session.model"]))["events"][0]["payload"]
+        ev = self.b.events(session=st["id"], kinds=["session.model"])[0]["payload"]
         self.assertEqual((ev["reported"], ev["selected"]), ("other-model", "test-model-1"))
         # it does not: the session fails instead of running on another model
         st = await self.b.tool("spawn", module="nomodel", wait=True)
         self.assertEqual(st["state"], "failed", st)
-        ended = (await self.b.tool("history", session=st["id"], kinds=["session.end"]))["events"][0]["payload"]
+        ended = self.b.events(session=st["id"], kinds=["session.end"])[0]["payload"]
         self.assertIn("test-model-1", ended["reason"])
 
     async def test_no_broker_tools_means_no_bridge(self):
@@ -355,7 +359,7 @@ class ModuleRunTests(BrokerCase):
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
         self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the peer.\n")
-        mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
+        mod = self.b.events(session=st["id"], kinds=["session.module"])[0]["payload"]
         self.assertEqual(mod["source"]["path"], "peer")
         self.assertEqual(len(mod["source"]["ref"]), 40)
 
@@ -369,9 +373,9 @@ class ModuleRunTests(BrokerCase):
         self.assertEqual(st["state"], "idle", st)
         _, r = await self.ask(st["id"], "INSTRUCTIONS")
         self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are the candidate peer.\n")
-        spawn = (await self.b.tool("history", session=st["id"], kinds=["session.spawn"]))["events"][0]["payload"]
+        spawn = self.b.events(session=st["id"], kinds=["session.spawn"])[0]["payload"]
         self.assertEqual((spawn["module_ref_override"], spawn["spec"]["source"]["ref"]), (candidate, candidate))
-        mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
+        mod = self.b.events(session=st["id"], kinds=["session.module"])[0]["payload"]
         self.assertEqual(mod["source"]["ref"], candidate)
         # only a full commit, and only for a module registered from a repository
         code, body = await self.b.call("spawn", {"module": "peer", "module_ref": "main"})
@@ -407,17 +411,14 @@ class CodexLoginTests(BrokerCase):
         self.assertIn('cli_auth_credentials_store = "file"', seen["config"])
         self.assertIn('web_search = "disabled"', seen["config"])
         self.assertEqual(seen["env"], {"NO_BROWSER": "1", "INITIAL_AGENT_MODE": "read-only"})
-        login = (await self.b.tool("history", session=st["id"], kinds=["session.login"]))["events"][0]["payload"]
+        login = self.b.events(session=st["id"], kinds=["session.login"])[0]["payload"]
         self.assertEqual((login["login"], login["plan"]), ("chatgpt", "plus"))
         # the broker's own login is untouched
         own = json.loads((self.b.cfg.codex_login_path / "auth.json").read_text())
         self.assertEqual(own["tokens"]["refresh_token"], FAKE_REFRESH_TOKEN)
 
         await self.b.tool("terminate", session=st["id"])
-        records = self.b.cfg.history_dir / "sessions" / st["id"] / "harness"
-        self.assertTrue((records / "projects" / "transcript.jsonl").is_file())
-        self.assertEqual(list(records.rglob("auth.json")), [])  # never collected
-        everything = "".join(f.read_text() for f in (self.b.cfg.history_dir / "events").glob("*.jsonl"))
+        everything = json.dumps(self.b.events())
         self.assertNotIn(FAKE_REFRESH_TOKEN, everything)
         self.assertNotIn(own["tokens"]["access_token"], everything)
 
@@ -588,6 +589,7 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
                                llm_gateway={"url": self.gw.url, "session_url": "http://gateway.test:4000",
                                             "master_key_env": "TEST_LITELLM_MASTER"},
                                telemetry=Telemetry(exporter=self.spans, place="pc1"))
+        self.b.spans = self.spans
         await self.b.start()
 
     async def asyncTearDown(self):
@@ -613,7 +615,7 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((path, auth), ("/key/generate", "Bearer master-secret-123456"))
         self.assertEqual((body["metadata"]["module"], body["metadata"]["agora_session"]), ("echo", f"{st['id']}@pc1"))
         # the key never reaches the history
-        hist = json.dumps(await self.b.tool("history", session=st["id"]))
+        hist = json.dumps(self.b.events(session=st["id"]))
         self.assertNotIn(f"sk-virtual-agora-{st['id']}", hist)
         await self.b.tool("terminate", session=st["id"])
         self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
@@ -632,4 +634,7 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parent.attributes["gen_ai.request.model"], "test-model-1")
         turns = [s for s in self.spans.get_finished_spans() if s.name == "turn" and s.parent.span_id == parent.context.span_id]
         self.assertTrue(turns)
-        self.assertIn("send", [e.name for e in parent.events])  # echo answered with send
+        sends = [s for s in self.spans.get_finished_spans() if s.name == "message.send"
+                 and s.attributes["session.id"] == st["id"]]
+        self.assertTrue(sends)  # echo answered with send, recorded under its session
+        self.assertEqual(turns[0].attributes["input.value"].split("\n")[0], "from: operator@pc1")

@@ -220,6 +220,15 @@ class RunningBroker:
             llm_gateway=llm_gateway,
         )
         make_codex_login(tmp / "codex-login")
+        if telemetry is None:  # the place's history goes to telemetry: keep it in memory to read back
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+            from agora.telemetry import Telemetry
+
+            self.spans = InMemorySpanExporter()
+            telemetry = Telemetry(None, place, exporter=self.spans)
+        else:
+            self.spans = None
         self.broker = Broker(self.cfg, telemetry=telemetry)
         self.sockets = make_sockets(self.cfg, self.broker.manager.runner)
         self.url = self.cfg.local_url
@@ -270,6 +279,24 @@ class RunningBroker:
 
     async def post(self, path: str, body: dict[str, Any], token: str | None = None, timeout: float = 60) -> tuple[int, Any]:
         return await asyncio.to_thread(self._post_sync, path, body, token or self.broker.key, timeout)
+
+    def events(self, session: str | None = None, kinds: list[str] | None = None,
+               thread_id: str | None = None) -> list[dict[str, Any]]:
+        """agora's events as the trace store got them: {kind, session_id,
+        thread_id, message_id, payload}, oldest first."""
+        out = []
+        for sp in self.spans.get_finished_spans():
+            a = sp.attributes or {}
+            if "agora.event" not in a:
+                continue
+            ev = {"kind": a["agora.event"], "session_id": a.get("agora.session_id"), "thread_id": a.get("agora.thread_id"),
+                  "message_id": a.get("agora.message_id"), "payload": json.loads(a.get("agora.payload") or "{}"),
+                  "start": sp.start_time}
+            if (session and ev["session_id"] != session) or (kinds and ev["kind"] not in kinds) \
+                    or (thread_id and ev["thread_id"] != thread_id):
+                continue
+            out.append(ev)
+        return sorted(out, key=lambda e: e["start"])
 
     def _mcp_sync(self, frame: dict[str, Any], token: str, timeout: float) -> tuple[int, Any, dict[str, str]]:
         req = urllib.request.Request(
