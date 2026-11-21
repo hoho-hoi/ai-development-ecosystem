@@ -17,7 +17,6 @@ from pathlib import Path
 from ..spec import Spec
 from . import STREAM_LIMIT, RunHandle, Runner
 
-BRIDGE_FILE = Path(__file__).resolve().parent.parent / "bridge.py"
 
 PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "TERM", "TZ", "SSL_CERT_FILE", "HTTPS_PROXY", "NO_PROXY")
 
@@ -64,7 +63,6 @@ class LocalRunner(Runner):
             process=proc,
             workspace_path=workspace,
             agora_path=agora,
-            bridge_command=[sys.executable, str(BRIDGE_FILE)],
             broker_url=self.broker_url,
             info={"runner": self.name, "pid": proc.pid, "bundle": str(bundle),
                   "harness": f"{spec.runtime.harness}@{spec.runtime.version} (local: {' '.join(spec.runtime.adapter)})"},

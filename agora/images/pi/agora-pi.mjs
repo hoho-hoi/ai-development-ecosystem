@@ -13,9 +13,12 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync, mkdtempSync } from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import {
 	createAgentSession,
 	createExtensionRuntime,
@@ -26,7 +29,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createMcpToolName, McpClient, StdioTransport, StreamableHttpTransport, toLlmContent } from "@earendil-works/pi-mcp";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
+// agora tools can wait up to 600 s (receive, spawn): allow that and some.
+const TOOL_TIMEOUT_MS = 20 * 60 * 1000;
 const MODEL_CONFIG_ID = "model";
 
 // stdout carries ACP only.
@@ -79,6 +84,30 @@ class RpcError extends Error {
 
 // --- MCP servers as pi tools ------------------------------------------------
 
+// fetch over node:http(s). Node's own fetch gives up waiting for response
+// headers after 300 s, shorter than the longest agora tool call.
+function longFetch(url, init = {}) {
+	return new Promise((resolve, reject) => {
+		const u = new URL(url);
+		const req = (u.protocol === "https:" ? https : http).request(
+			u,
+			{ method: init.method ?? "GET", headers: Object.fromEntries(new Headers(init.headers ?? {})) },
+			(res) => {
+				const headers = new Headers();
+				for (const [k, v] of Object.entries(res.headers)) {
+					if (v !== undefined) headers.set(k, Array.isArray(v) ? v.join(", ") : v);
+				}
+				const nobody = res.statusCode === 202 || res.statusCode === 204 || init.method === "HEAD";
+				resolve(new Response(nobody ? null : Readable.toWeb(res), { status: res.statusCode, headers }));
+			},
+		);
+		req.on("error", reject);
+		init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")), { once: true });
+		if (init.body) req.write(typeof init.body === "string" ? init.body : Buffer.from(init.body));
+		req.end();
+	});
+}
+
 const mcpClients = new Map(); // server config (JSON) -> connected client
 async function mcpClient(server) {
 	const key = JSON.stringify(server);
@@ -88,6 +117,7 @@ async function mcpClient(server) {
 			? new StreamableHttpTransport({
 					url: server.url,
 					headers: Object.fromEntries((server.headers ?? []).map((h) => [h.name, h.value])),
+					fetch: longFetch,
 				})
 			: new StdioTransport({
 					command: server.command,
@@ -121,7 +151,7 @@ async function mcpTools(servers) {
 				parameters: { ...tool.inputSchema, type: "object", properties: tool.inputSchema?.properties ?? {} },
 				exposure: "direct", // declared to the model from the first request
 				execute: async (_id, params, signal) => {
-					const result = await client.callTool(tool.name, params ?? {}, { signal });
+					const result = await client.callTool(tool.name, params ?? {}, { signal, timeoutMs: TOOL_TIMEOUT_MS });
 					return { content: toLlmContent(result), details: undefined, isError: result.isError === true };
 				},
 			});
@@ -208,7 +238,7 @@ function getSession(params) {
 const handlers = {
 	initialize: async () => ({
 		protocolVersion: 1,
-		agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+		agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} }, mcpCapabilities: { http: true, sse: false } },
 		agentInfo: { name: "agora-pi", version: VERSION },
 		authMethods: [],
 	}),

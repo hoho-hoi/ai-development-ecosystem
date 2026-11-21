@@ -63,7 +63,7 @@ class DockerTests(BrokerCase):
         self.assertEqual(env["secret"], SECRET)
         self.assertIsNone(env["leaked_host_var"])
 
-        # the container reaches the broker through the bridge with its token
+        # the container reaches the place's MCP endpoint with its token
         who = await self.b.tool("send", to=sid, body='BRIDGE status {"session": "self"}')
         result = json.loads((await self.reply_to(who["message_id"], wait=60))["body"])
         self.assertFalse(result["isError"], result)

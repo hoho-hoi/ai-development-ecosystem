@@ -41,7 +41,7 @@ MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 # and the directory of the same name at the module root.
 NAMESPACE = "io.github.hoho-hoi.agora"
 ROOT_PLACEHOLDER = "${PLUGIN_ROOT}"
-RESERVED_MCP_NAMES = {"agora"}  # the bridge's server name in every session
+RESERVED_MCP_NAMES = {"agora"}  # the place's MCP server in every session
 
 NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$")
 
@@ -273,7 +273,7 @@ class ResolvedModule:
         for name, d in self.mcp.mcp_servers.items():
             where = f"{MCP_FILE}: server {name!r}"
             if name in RESERVED_MCP_NAMES:
-                raise ModuleError(f"{where}: the name is reserved for the agora bridge")
+                raise ModuleError(f"{where}: the name is reserved for the place's MCP server")
             if d.type == "stdio":
                 if not d.command or d.url:
                     raise ModuleError(f"{where}: a stdio server needs command and no url")

@@ -26,8 +26,7 @@ class RunHandle:
     process: asyncio.subprocess.Process
     workspace_path: str  # cwd for ACP session/new, as seen by the agent
     agora_path: str  # per-session harness config dir, as seen by the agent
-    bridge_command: list[str]  # how the agent starts the broker's MCP bridge
-    broker_url: str  # broker URL as reachable from the agent
+    broker_url: str  # the place's URL as reachable from the agent (its MCP endpoint is /mcp)
     info: dict[str, Any] = field(default_factory=dict)
 
     @property

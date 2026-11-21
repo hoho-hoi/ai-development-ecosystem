@@ -2,10 +2,10 @@
 """A tiny ACP agent for tests (stdlib only).
 
 It behaves like an agent that answers with `send`: for every prompt it works
-out a reply and sends it through the broker's MCP bridge (the "agora" server it
-was given) as send(reply_to=<message_id>, body=<reply>). It also writes the
+out a reply and sends it through agora's MCP server (the "agora" HTTP server
+it was given) as send(reply_to=<message_id>, body=<reply>). It also writes the
 reply as its final text, which the broker records and delivers to no one.
-Without a bridge it can only write the final text.
+Without that server it can only write the final text.
 
 The reply is "echo: <body>", except for these bodies:
     echo: …            (another agent's echo) noted as "heard: …" and not answered,
@@ -21,7 +21,7 @@ The reply is "echo: <body>", except for these bodies:
     SESSION            reply with the ACP session id and prompt count
     INSTRUCTIONS       reply with the instruction/skill/settings files it sees
     BRIDGE <tool> <json>
-                       call that bridge tool, reply with the tool result;
+                       call that agora tool, reply with the tool result;
                        "$MSG" in the JSON becomes the current message id
     CODEX_AUTH         reply with what the session's Codex login looks like
     REMEMBER <text>    keep text in this conversation's memory
@@ -40,9 +40,9 @@ FAKE_NO_LOAD=1).
 
 import json
 import os
-import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 state = {"mcp": None, "next_id": 1000, "sessions": 0, "prompts": {}, "closed": [], "bridge": None, "rpc": 10,
@@ -146,38 +146,30 @@ def ask_permission(session_id, kind):
             return f.get("result")
 
 
-def rpc(frame):
-    p = state["bridge"]
-    p.stdin.write(json.dumps(frame) + "\n")
-    p.stdin.flush()
-    if "id" in frame:
-        while True:
-            reply = json.loads(p.stdout.readline())
-            if reply.get("id") == frame["id"]:
-                return reply
-
-
-def bridge():
-    """Start the broker bridge once and keep it, as a harness keeps its MCP servers."""
+def agora():
+    """agora's MCP server (Streamable HTTP), as the harness was given it."""
     servers = [s for s in (state["mcp"] or []) if s.get("name") == "agora"]
-    if not servers:
-        return None
-    if state["bridge"] is None:
-        srv = servers[0]
-        env = os.environ.copy()
-        env.update({e["name"]: e["value"] for e in srv.get("env", [])})
-        state["bridge"] = subprocess.Popen(
-            [srv["command"], *srv["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True
-        )
-        rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-             "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "0"}}})
-        rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    return state["bridge"]
+    return servers[0] if servers else None
+
+
+def rpc(frame):
+    srv = agora()
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    headers.update({h["name"]: h["value"] for h in srv.get("headers", [])})
+    req = urllib.request.Request(srv["url"], data=json.dumps(frame).encode(), headers=headers, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=900) as r:
+        body = r.read()
+    return json.loads(body) if body else None
 
 
 def call_tool(tool, args):
-    if bridge() is None:
-        return {"error": "no bridge"}
+    if agora() is None:
+        return {"error": "no agora server"}
+    if not state["bridge"]:
+        rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "0"}}})
+        state["bridge"] = True
     state["rpc"] += 1
     res = rpc({"jsonrpc": "2.0", "id": state["rpc"], "method": "tools/call", "params": {"name": tool, "arguments": args}})
     return res.get("result") if "result" in res else {"rpc_error": res.get("error")}
@@ -295,7 +287,8 @@ def main():
                     "result": {
                         "protocolVersion": 1,
                         "agentCapabilities": {"loadSession": os.environ.get("FAKE_NO_LOAD") != "1",
-                                              "sessionCapabilities": {"close": {}}},
+                                              "sessionCapabilities": {"close": {}},
+                                              "mcpCapabilities": {"http": True}},
                         "agentInfo": {"name": "fake-agent", "version": "0"},
                         "authMethods": [],
                     },

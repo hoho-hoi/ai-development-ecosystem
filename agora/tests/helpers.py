@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import subprocess
 import sys
@@ -20,7 +21,6 @@ from agora.config import BrokerConfig  # noqa: E402
 from agora.daemon import Broker, make_sockets  # noqa: E402
 
 FAKE_AGENT = ROOT / "tests" / "fake_acp_agent.py"
-BRIDGE = ROOT / "src" / "agora" / "bridge.py"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -271,16 +271,53 @@ class RunningBroker:
     async def post(self, path: str, body: dict[str, Any], token: str | None = None, timeout: float = 60) -> tuple[int, Any]:
         return await asyncio.to_thread(self._post_sync, path, body, token or self.broker.key, timeout)
 
+    def _mcp_sync(self, frame: dict[str, Any], token: str, timeout: float) -> tuple[int, Any, dict[str, str]]:
+        req = urllib.request.Request(
+            self.url + "/mcp",
+            data=json.dumps(frame).encode(),
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                     "Authorization": f"Bearer {token}"},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=timeout) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read()), {}
+
+    async def call(self, tool_name: str, args: dict[str, Any], token: str | None = None) -> tuple[int, Any]:
+        """Call a tool on the place's MCP endpoint: (status, result). A tool error
+        comes back as its agora status and {"error": message}."""
+        frame = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool_name, "arguments": args}}
+        timeout = float(args.get("wait") or 0) + float(args.get("wait_timeout") or 0) + 120
+        code, reply, _ = await asyncio.to_thread(self._mcp_sync, frame, token or self.broker.key, timeout)
+        if code != 200:
+            return code, reply
+        result = reply["result"]
+        text = result["content"][0]["text"]
+        if result.get("isError"):
+            m = re.match(r"agora error (\d+): (.*)", text, re.S)
+            return (int(m.group(1)), {"error": m.group(2)}) if m else (500, {"error": text})
+        return 200, json.loads(text)
+
+    async def register(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """Join as an external MCP client with the broker key: (status, {token, session_id, name})."""
+        frame = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": name, "version": "0"}}}
+        code, reply, headers = await asyncio.to_thread(self._mcp_sync, frame, token or self.broker.key, 30)
+        if code != 200:
+            return code, reply
+        sid = {k.lower(): v for k, v in headers.items()}.get("mcp-session-id")
+        _, me = await self.call("whoami", {}, sid)
+        return 200, {"token": sid, "session_id": me["id"], "name": me["name"]}
+
     async def tool(self, tool_name: str, token: str | None = None, /, **args: Any) -> Any:
         if tool_name == "spawn" and args.get("module") in ("echo", "locked") and "workspace" not in args \
                 and not args.get("place"):
             args["workspace"] = self.default_workspace
-        code, body = await self.post(f"/api/tools/{tool_name}", args, token, timeout=args.get("wait", 0) + 120)
+        code, body = await self.call(tool_name, args, token)
         if code != 200:
             raise AssertionError(f"{tool_name} -> {code}: {body}")
         return body
-
-    def bridge_env(self, **extra: str) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("AGORA_")}
-        env.update({"AGORA_BROKER_URL": self.url, "AGORA_BROKER_KEY": self.broker.key, **extra})
-        return env

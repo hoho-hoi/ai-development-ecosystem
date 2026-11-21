@@ -26,7 +26,6 @@ IMAGES_ROOT = Path(__file__).resolve().parents[3]
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_HB = "/home/agent/.agora"
 CONTAINER_BUNDLE = "/agora-bundle.tar"
-CONTAINER_BRIDGE = ["python3", "/opt/agora/agora_bridge.py"]
 
 # Enough for the entrypoint to unpack and chown the bundle, then drop to the
 # agent user; everything else is dropped.
@@ -227,7 +226,6 @@ class DockerRunner(Runner):
             process=proc,
             workspace_path=CONTAINER_WORKSPACE,
             agora_path=CONTAINER_HB,
-            bridge_command=list(CONTAINER_BRIDGE),
             broker_url=self.broker_url,
             info={"runner": self.name, "container": name, "image": image,
                   "harness": f"{spec.runtime.harness}@{spec.runtime.version}", "bundle": str(bundle)},

@@ -28,7 +28,7 @@ def _copy_skills(skill_dirs: list[Path], dest: Path) -> list[str]:
     return names
 
 
-BRIDGE_SERVER = "agora"  # MCP server name of the broker bridge in every session
+BRIDGE_SERVER = "agora"  # MCP server name of the place in every session
 OPENCODE_AGENT = "agora"  # the one agent of an OpenCode session
 
 

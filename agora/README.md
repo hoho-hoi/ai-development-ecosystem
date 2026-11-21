@@ -21,17 +21,17 @@
 │ 履歴（JSONL + SQLite）・場所の鍵        │  /federation/*   │ 履歴（JSONL + SQLite）・場所の鍵        │
 │ Runner（docker / local）              │                  │ Runner（docker / local）              │
 └──┬──────────────────────┬────────────┘                  └──┬───────────────────────────────────┘
-   │ MCP（agora mcp）         │ ACP                               │ ACP
+   │ MCP over HTTP（/mcp）    │ ACP（＋MCP over HTTP）              │ ACP
 ┌──┴───────────────┐  ┌───┴──────────────────────┐        ┌───┴──────────────────────┐
 │ 外部セッション     │  │ 管理下セッション（コンテナ） │        │ 管理下セッション（コンテナ） │
-│ Claude Code など  │  │ ハーネス + agora ブリッジ      │        │ ハーネス + agora ブリッジ      │
+│ Claude Code など  │  │ ハーネス                     │        │ ハーネス                     │
 └──────────────────┘  └──────────────────────────┘        └──────────────────────────┘
 ```
 
 - **人（セッション）**：管理下セッション（場所がコンテナで起動する）、外部セッション（人が自分で起動した Claude Code などをつなぐ）、操作者（`agora` コマンドを使うあなた）の3種類です。全員が Ed25519 の鍵を持ち、id は公開鍵から作ります（`s-` + SHA-256 の先頭16桁）。秘密鍵は住んでいる場所が持ち、コンテナの中のエージェントには渡しません。
 - **住所**：`id@場所`。同じ場所の中なら id か名前だけで通じます。
 - **場所**：マシンごとの `agora daemon`。自分の住人の受信箱と履歴を持ち、話してよい場所（`peers`）を名前・URL・公開鍵で設定します。
-- セッションは全員、stdio の MCP サーバー `agora mcp`（ブリッジ）を通して自分の場所のツールを使います。ブリッジは標準ライブラリだけで書かれた単一ファイル（`src/agora/bridge.py`）で、イメージにもそのままコピーされます。
+- 場所はそのまま MCP サーバーです（`http://<場所>/mcp`、Streamable HTTP）。セッションは全員、ここで自分の場所のツールを使います。管理下セッションには、場所が URL と自分のトークン（`Authorization: Bearer`）を渡します。使えるツールは、場所がトークンから決めます。
 
 ## 通信モデル
 
@@ -48,7 +48,7 @@
 - **署名**：メッセージは送った人の鍵で署名します。受け取った場所は、届けた場所の言い分ではなく、署名と「公開鍵から作った id」が一致するかで送り主を確かめます。操作者のメッセージは場所の鍵で署名します。
 - **返信**：`reply_to` にもとのメッセージの id を付けた `send`。宛先を省くと、もとのメッセージの送信元に届き（別の場所でも）、スレッドも引き継ぎます。
 - **相手が黙ったとき**：`receive` に `from` を付けて待っていると、その相手がもう何も送れない状態（管理下セッションが待機中で未読もない、または終了した）になった時点で、空のまま返ります（`from_quiet: true`）。相手が別の場所にいれば、その場所に問い合わせます。返事をせずにターンを終えたことも、落ちたことも、待つ側はこれで知ります。
-- **通知**：`receive` 以外のツールの結果には、未読の件数と送信元を添えます（ブリッジは結果の後ろに1行足します。HTTP では `X-Agora-Unread` ヘッダー）。中身は `receive` で読みます。Channels でつないだ Claude Code には本文ごと push します。
+- **通知**：`receive` 以外のツールの結果には、未読の件数と送信元を添えます（ツール結果の後ろに1行足します）。中身は `receive` で読みます。
 - **管理下セッションへの渡し方**：見出しを付けた本文を、ACP のプロンプトとして渡します。
 
 ```
@@ -219,7 +219,7 @@ my-module/
 - **plugin.json**：Agent Plugins の閉じたスキーマに従います（`$schema`・`name`・`version`・`description`・`author`・`homepage`・`repository`・`license`・`keywords`・`extensions` のみ）。`name` がモジュールの id で、`list_modules` と `spawn` で使います。
 - **指示**：ハーネスの指示ファイル（Claude Code なら `CLAUDE.md`、Codex なら `AGENTS.md`、OpenCode なら agent の system）として配置します。ほかのクライアントはこの名前空間を無視し、skill と MCP だけを使います。
 - **skill**：`skills/` の直下のディレクトリだけを読みます。`SKILL.md` の `name` はディレクトリ名と同じにします。
-- **MCP サーバー**（`mcp.json`）：`stdio` と `http`（`streamable-http`）に対応します。モジュール全体をセッションの中に写し、`${PLUGIN_ROOT}` と `./` で始まる `command` をその場所に置き換えて、ACP の `session/new` で渡します。`command` は1つの実行ファイル（コマンドラインは不可）、`cwd` は使えません（ACP にない）、リモートは https のみ、名前 `agora` はブリッジ用に予約しています。
+- **MCP サーバー**（`mcp.json`）：`stdio` と `http`（`streamable-http`）に対応します。モジュール全体をセッションの中に写し、`${PLUGIN_ROOT}` と `./` で始まる `command` をその場所に置き換えて、ACP の `session/new` で渡します。`command` は1つの実行ファイル（コマンドラインは不可）、`cwd` は使えません（ACP にない）、リモートは https のみ、名前 `agora` は場所の MCP サーバー用に予約しています。
 - **モデルの確認**：ハーネスが ACP でモデルの選択肢を示す場合、起動時に現在のモデルを確かめ、違えばモジュールのモデルに切り替えます。選択肢にないときは、別のモデルで動かさずに起動を失敗させます（`session.model` に記録）。
 - **作業場所**：作業するリポジトリは依頼ごとに変わるので、`spawn` の `workspace`（`{repo, ref}`）で渡します。CLAUDE.md・AGENTS.md・`.claude`・`.mcp.json`・`.codex`・`.gemini`・`.opencode`・`.pi`・`.agents` などは全階層から除去します。
 - サブエージェントは持ちません。別のエージェントが必要なら、agora で別のセッションを起こして話します。
@@ -266,7 +266,7 @@ OpenCode V2 は自身が ACP を話す（`opencode acp`）ので、アダプタ�
 - `OPENCODE_CONFIG`・`OPENCODE_CONFIG_DIR` をそこに向け、プロジェクトの設定と CLAUDE.md 系の読み込み、自動更新を切り、XDG のディレクトリもセッションの中にします。ホストの `~/.config/opencode` や認証情報は読みません。
 - provider の認証情報がないと、OpenCode は無料の別モデルで始めようとします。agora はそれを検出して起動を失敗させます。
 - **無料モデル**：OpenCode Zen には期間限定の無料モデルがあり、API キーなしで使えます（`opencode/<名前>`。無料モデルは OpenCode のハーネスからだけ使える）。提供元がデータを保持・学習に使うものがあるので、ゼロリテンションと明記されたもの（`deepseek-v4.1-flash-free`、`glm-5.3-flash-free`、`minimax-m3.1-flash-free` など）を選びます。条件は OpenCode の Console 文書の「Free models」「Privacy」で確かめてください。
-- コンテナが HTTP プロキシ経由でしか外に出られない場所では、`agora.yaml` の `network.proxy` を指定します（`HTTPS_PROXY` として渡ります。ブリッジの agora への通信はプロキシを通りません）。
+- コンテナが HTTP プロキシ経由でしか外に出られない場所では、`agora.yaml` の `network.proxy` を指定します（`HTTPS_PROXY` として渡ります。場所と LLM のゲートウェイへの通信はプロキシを通しません）。
 
 ## Codex を ChatGPT プランで動かす
 
@@ -290,21 +290,22 @@ agora daemon --config agora.yaml
 
 ## 外部セッションをつなぐ
 
-外部セッションのブリッジは、ブローカーの鍵（`<state_dir>/broker.key`、権限 0600）で自分を登録します。
+外部セッションは、場所の MCP サーバーにブローカーの鍵（`<state_dir>/broker.key`、権限 0600）でつなぎます。つなぐと外部セッションとして登録され、MCP のセッションを閉じると終わります。届いたメッセージは、ほかのツール結果に未読の数が出るので、`receive` で読みます。
 
-**Claude Code（Channels で即時に受信）**
+**Claude Code**
 
 ```sh
-claude mcp add --scope user agora -- agora mcp --harness claude-code --channel
-claude --dangerously-load-development-channels server:agora
+claude mcp add --scope user --transport http agora http://127.0.0.1:8765/mcp --header "Authorization: Bearer $(cat <state_dir>/broker.key)"
 ```
 
-Channels は claude.ai ログインが必要で、セッションを開いている間だけ届きます。`--channel` を付けなければ、Codex と同じ方式で受け取ります。
+**Codex**
 
-**Codex（ツール結果の通知を見て `receive`）**
+`~/.codex/config.toml` に、URL とヘッダーを書きます。
 
-```sh
-codex mcp add agora -- agora mcp --harness codex
+```toml
+[mcp_servers.agora]
+url = "http://127.0.0.1:8765/mcp"
+http_headers = { Authorization = "Bearer <broker.key の中身>" }
 ```
 
 ## ツール
@@ -349,7 +350,7 @@ agora call history '{"session": "s-…@pc2", "after_seq": 120, "wait": 60}' --co
 - コンテナ：`--cap-drop ALL`（展開に必要な最小限だけ追加）、`no-new-privileges`、プロセス数の上限、ホストのディレクトリはマウントしない、エージェントは uid 10001 で実行
 - 認証：ブローカーの鍵（操作者と外部セッションの登録用）と、セッションごとのトークン。場所どうしは場所の鍵で署名し、メッセージは送った人の鍵で署名する
 - spawn：`spawnableBy`、深さの上限、同時起動数の上限
-- 受信メッセージはほかのエージェントからの情報として扱うよう、ブリッジの指示に書いています
+- 受信メッセージはほかのエージェントからの情報として扱うよう、場所の MCP サーバーの指示（instructions）に書いています
 
 ## テスト
 
@@ -376,4 +377,4 @@ AGORA_TEST_DOCKER_IMAGE=$(docker inspect --format '{{.Id}}' agora-test-agent) py
 - **クローンの実機確認**：本物の claude-agent-acp・codex-acp で `session/load` による再開ができるかは未確認です。ローカルランナーではワークスペースの絶対パスが元の人と変わるため、作業ディレクトリごとに記録を分けるハーネス（Claude Code）は会話を見つけられない可能性があります（docker ランナーでは常に `/workspace`）。
 - **費用の上限**：トークンや費用の上限はまだありません。制限できるのは実行時間と同時起動数だけです。
 - **ツールの無効化**：`deniedTools` は Claude Code の `settings.json` にだけ書き込みます。Codex のツール制限は未対応です。
-- 当初は TypeScript を想定していましたが、開発環境の都合で Python で実装しました。MCP ブリッジは、Claude Code Channels の通知を任意のタイミングで送るために自前で実装し、公式 MCP SDK のクライアントで動作を確認しています。
+- 当初は TypeScript を想定していましたが、開発環境の都合で Python で実装しました。MCP サーバーは場所が HTTP で直接話し、公式 MCP SDK のクライアントで動作を確認しています（v0.12 までは stdio のブリッジを挟んでいました）。

@@ -537,10 +537,10 @@ class CodexLoginTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t, self.assertRaisesRegex(Exception, "needs harness: codex"):
             make_spec(Path(t), runtime={"login": "chatgpt"})
 
-    def test_bridge_tools_are_annotated(self):
-        from agora.bridge import TOOLS
+    def test_agora_tools_are_annotated(self):
+        from agora.tools import TOOL_SCHEMAS
 
-        ann = {t["name"]: t["annotations"] for t in TOOLS}
+        ann = {t["name"]: t["annotations"] for t in TOOL_SCHEMAS}
         for name in ("send", "receive", "spawn", "clone"):
             self.assertEqual((ann[name]["destructiveHint"], ann[name]["openWorldHint"]), (False, False), name)
         self.assertTrue(ann["terminate"]["destructiveHint"])

@@ -106,7 +106,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
             raise PlaceError("connection refused", 502)
 
         fed.post = down
-        code, body = await self.pc1.post("/api/tools/send", {"to": st["address"], "body": "x"})
+        code, body = await self.pc1.call("send", {"to": st["address"], "body": "x"})
         self.assertEqual(code, 502, body)
         self.assertIn("3 attempts", body["error"])
 
@@ -162,7 +162,7 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
 
     async def test_spawn_rules_and_parents_hold_across_places(self):
         # an external session at pc1 (e.g. a Claude Code the user runs there)
-        _, me = await self.pc1.post("/api/register", {"name": "me"})
+        _, me = await self.pc1.register("me")
         token = me["token"]
         a = await self.pc1.tool("whoami", token)
         # echo is spawnableBy external, at another place too
@@ -172,20 +172,20 @@ class TwoPlaces(unittest.IsolatedAsyncioTestCase):
         got = await self.reply(self.pc1, child["task_message_id"], child["address"], token)
         self.assertEqual(got["body"], "echo: from a")
         # but not locked, whose spawnableBy is [reviewer]
-        code, body = await self.pc1.post("/api/tools/spawn", {"module": "locked", "place": "pc2"}, token)
+        code, body = await self.pc1.call("spawn", {"module": "locked", "place": "pc2"}, token)
         self.assertEqual(code, 403, body)
         # only an operator, the parent or the person itself may terminate
-        _, other = await self.pc1.post("/api/register", {"name": "other"})
-        code, body = await self.pc1.post("/api/tools/terminate", {"session": child["address"]}, other["token"])
+        _, other = await self.pc1.register("other")
+        code, body = await self.pc1.call("terminate", {"session": child["address"]}, other["token"])
         self.assertEqual(code, 403, body)
         done = await self.pc1.tool("terminate", token, session=child["address"])
         self.assertEqual(done["state"], "terminated")
 
     async def test_unknown_place(self):
-        code, body = await self.pc1.post("/api/tools/send", {"to": "someone@pc3", "body": "x"})
+        code, body = await self.pc1.call("send", {"to": "someone@pc3", "body": "x"})
         self.assertEqual(code, 404, body)
         self.assertIn("unknown place", body["error"])
-        code, body = await self.pc1.post("/api/tools/spawn", {"module": "echo", "place": "pc3"})
+        code, body = await self.pc1.call("spawn", {"module": "echo", "place": "pc3"})
         self.assertEqual(code, 404, body)
 
     # --- what a place accepts from another ---------------------------------------

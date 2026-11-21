@@ -1,5 +1,5 @@
-"""End-to-end: broker over HTTP, local runner, fake ACP agent, and the stdio
-bridge driven by the official MCP SDK client.
+"""End-to-end: the place over HTTP, local runner, fake ACP agent, and the
+place's MCP endpoint driven by the official MCP SDK client.
 
 The fake agent answers the way every agent must: with send(reply_to=...).
 """
@@ -14,7 +14,6 @@ import unittest
 from pathlib import Path
 
 from helpers import (
-    BRIDGE,
     FAKE_REFRESH_TOKEN,
     NS,
     RunningBroker,
@@ -126,14 +125,14 @@ class LifecycleTests(BrokerCase):
         self.assertEqual(env["secret"], SECRET)  # declared secret passed through
         self.assertIsNone(env["leaked_host_var"])  # nothing else from the host env
 
-    async def test_bridge_entry_given_to_agent(self):
+    async def test_agora_server_given_to_agent(self):
         st = await self.b.tool("spawn", module="echo", wait=True)
         _, r = await self.ask(st["id"], "MCP")
         servers = json.loads(r["body"])
-        self.assertEqual(servers[0]["name"], "agora")
-        env = {e["name"]: e["value"] for e in servers[0]["env"]}
-        self.assertEqual(env["AGORA_TOKEN"], self.b.broker.manager.sessions[st["id"]].token)
-        self.assertEqual(set(env), {"AGORA_BROKER_URL", "AGORA_TOKEN"})  # all tools: no AGORA_TOOLS
+        self.assertEqual((servers[0]["name"], servers[0]["type"]), ("agora", "http"))
+        self.assertEqual(servers[0]["url"], f"{self.b.broker.manager.runner.broker_url}/mcp")
+        token = self.b.broker.manager.sessions[st["id"]].token
+        self.assertEqual(servers[0]["headers"], [{"name": "Authorization", "value": f"Bearer {token}"}])
 
     async def test_final_text_reaches_no_one(self):
         st = await self.b.tool("spawn", module="echo", wait=True)
@@ -188,9 +187,9 @@ class LifecycleTests(BrokerCase):
         inject = (await self.b.tool("history", session=st["id"], kinds=["message.inject"]))["events"][-1]
         self.assertIn(f"in_reply_to: {question['message_id']}", inject["payload"]["text"])
         # a reply needs a message that was addressed to you
-        code, body = await self.b.post("/api/tools/send", {"reply_to": answer["message_id"], "body": "x"})
+        code, body = await self.b.call("send", {"reply_to": answer["message_id"], "body": "x"})
         self.assertEqual(code, 400, body)
-        code, body = await self.b.post("/api/tools/send", {"body": "nowhere"})
+        code, body = await self.b.call("send", {"body": "nowhere"})
         self.assertEqual(code, 400, body)
 
     async def test_notice_lists_unread_mid_turn(self):
@@ -229,7 +228,7 @@ class LifecycleTests(BrokerCase):
         dropped = (await self.b.tool("history", session=st["id"], kinds=["message.dropped"]))["events"]
         self.assertEqual([e["message_id"] for e in dropped], [waiting["message_id"]])
         self.assertEqual((await self.b.tool("receive"))["messages"], [])  # the broker sends nobody anything
-        code, _ = await self.b.post("/api/tools/send", {"to": st["id"], "body": "too late"})
+        code, _ = await self.b.call("send", {"to": st["id"], "body": "too late"})
         self.assertEqual(code, 404)
 
     async def test_messages_queue_while_busy(self):
@@ -264,7 +263,7 @@ class LifecycleTests(BrokerCase):
 
     async def test_send_has_no_idempotency_key(self):
         st = await self.b.tool("spawn", module="echo", wait=True)
-        code, body = await self.b.post("/api/tools/send", {"to": st["id"], "body": "x", "idempotency_key": "k1"})
+        code, body = await self.b.call("send", {"to": st["id"], "body": "x", "idempotency_key": "k1"})
         self.assertEqual(code, 400, body)
 
 
@@ -296,11 +295,14 @@ class ModuleRunTests(BrokerCase):
         self.assertEqual(info["session"], "fake-session-3")  # 3rd message, 3rd conversation
         self.assertEqual(info["closed"], ["fake-session-1", "fake-session-2"])
 
-        # brokerTools: [send] -> the bridge offers send only, and the broker enforces it
+        # brokerTools: [send] -> the place lists and allows send only
         _, r = await self.ask(sid, "MCP")
         servers = json.loads(r["body"])
-        env = {e["name"]: e["value"] for e in servers[0]["env"]}
-        self.assertEqual(env["AGORA_TOOLS"], "send")
+        self.assertEqual(servers[0]["name"], "agora")
+        token = self.b.broker.manager.sessions[sid].token
+        _, listed, _ = await asyncio.to_thread(
+            self.b._mcp_sync, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token, 30)
+        self.assertEqual([t["name"] for t in listed["result"]["tools"]], ["send"])
         # the module's own MCP server, pointing at the module copied into the session
         tool = servers[1]
         self.assertEqual(tool["name"], "tool")
@@ -309,9 +311,10 @@ class ModuleRunTests(BrokerCase):
         _, r = await self.ask(sid, f"READ {root}/bin/tool")
         self.assertEqual(json.loads(r["body"]), "#!/bin/sh\n")
         _, r = await self.ask(sid, 'BRIDGE spawn {"module": "echo"}')
-        self.assertEqual(json.loads(r["body"])["rpc_error"]["code"], -32602)  # not offered
-        token = self.b.broker.manager.sessions[sid].token
-        code, body = await self.b.post("/api/tools/spawn", {"module": "echo"}, token)
+        res = json.loads(r["body"])
+        self.assertTrue(res["isError"])
+        self.assertIn("not among this session's tools", res["content"][0]["text"])
+        code, body = await self.b.call("spawn", {"module": "echo"}, token)
         self.assertEqual(code, 403, body)
         self.assertIn("not among this session's tools", body["error"])
 
@@ -371,9 +374,9 @@ class ModuleRunTests(BrokerCase):
         mod = (await self.b.tool("history", session=st["id"], kinds=["session.module"]))["events"][0]["payload"]
         self.assertEqual(mod["source"]["ref"], candidate)
         # only a full commit, and only for a module registered from a repository
-        code, body = await self.b.post("/api/tools/spawn", {"module": "peer", "module_ref": "main"})
+        code, body = await self.b.call("spawn", {"module": "peer", "module_ref": "main"})
         self.assertEqual(code, 400, body)
-        code, body = await self.b.post("/api/tools/spawn", {"module": "mod", "module_ref": candidate})
+        code, body = await self.b.call("spawn", {"module": "mod", "module_ref": candidate})
         self.assertEqual(code, 400, body)
 
     async def test_receive_wait_is_bounded_and_filters(self):
@@ -433,7 +436,7 @@ class CodexLoginTests(BrokerCase):
 
 class PolicyTests(BrokerCase):
     async def register(self, name="ext"):
-        code, body = await self.b.post("/api/register", {"name": name, "harness": "codex"})
+        code, body = await self.b.register(name)
         self.assertEqual(code, 200, body)
         return body
 
@@ -442,7 +445,7 @@ class PolicyTests(BrokerCase):
         # external may spawn echo, not locked
         st = await self.b.tool("spawn", ext["token"], module="echo", wait=True)
         self.assertEqual(st["state"], "idle")
-        code, body = await self.b.post("/api/tools/spawn", {"module": "locked"}, ext["token"])
+        code, body = await self.b.call("spawn", {"module": "locked"}, ext["token"])
         self.assertEqual(code, 403, body)
         # a managed echo session (depth 1, budget 1) may spawn echo once more,
         # but that child (budget 0) may not spawn again
@@ -450,7 +453,7 @@ class PolicyTests(BrokerCase):
         grand = await self.b.tool("spawn", child_token, module="echo", wait=True)
         self.assertEqual(grand["depth"], 2)
         grand_token = self.b.broker.manager.sessions[grand["id"]].token
-        code, body = await self.b.post("/api/tools/spawn", {"module": "echo"}, grand_token)
+        code, body = await self.b.call("spawn", {"module": "echo"}, grand_token)
         self.assertEqual(code, 403)
         self.assertIn("no spawn depth left", body["error"])
 
@@ -458,35 +461,33 @@ class PolicyTests(BrokerCase):
         a = await self.register("a")
         other = await self.register("b")
         st = await self.b.tool("spawn", a["token"], module="echo", wait=True)
-        code, _ = await self.b.post("/api/tools/terminate", {"session": st["id"]}, other["token"])
+        code, _ = await self.b.call("terminate", {"session": st["id"]}, other["token"])
         self.assertEqual(code, 403)
         done = await self.b.tool("terminate", a["token"], session=st["id"])
         self.assertEqual(done["state"], "terminated")
 
     async def test_bad_requests(self):
-        code, body = await self.b.post("/api/tools/spawn", {"module": "echo", "bogus": 1})
+        code, body = await self.b.call("spawn", {"module": "echo", "bogus": 1})
         self.assertEqual(code, 400)
-        code, _ = await self.b.post("/api/tools/spawn", {"module": "nope"})
+        code, _ = await self.b.call("spawn", {"module": "nope"})
         self.assertEqual(code, 404)
-        code, _ = await self.b.post("/api/tools/list_modules", {}, token="wrong")
+        code, _ = await self.b.call("list_modules", {}, token="wrong")
         self.assertEqual(code, 403)
-        code, _ = await self.b.post("/api/register", {"name": "x"}, token="wrong")
+        code, _ = await self.b.register("x", token="wrong")
         self.assertEqual(code, 403)
 
 
-class BridgeTests(BrokerCase):
-    async def test_official_mcp_client_through_bridge(self):
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
+class McpEndpointTests(BrokerCase):
+    async def test_official_mcp_client_joins_with_the_broker_key(self):
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
 
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=[str(BRIDGE), "--name", "codex-ext", "--harness", "codex"],
-            env=self.b.bridge_env(),
-        )
-        async with stdio_client(params) as (read, write):
+        http = create_mcp_http_client(headers={"Authorization": f"Bearer {self.b.broker.key}"})
+        async with http, streamable_http_client(f"{self.b.url}/mcp", http_client=http) as (read, write, *_):
             async with ClientSession(read, write) as client:
-                await client.initialize()
+                init = await client.initialize()
+                self.assertIn("send", init.instructions)
                 tools = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
                     tools, ["send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate",
@@ -503,14 +504,14 @@ class BridgeTests(BrokerCase):
                 self.assertTrue(listed["terminate"].destructive_hint)
                 self.assertTrue(listed["history"].read_only_hint)
 
-                res = await client.call_tool("spawn", {"module": "echo", "task": "via bridge"})
+                res = await client.call_tool("spawn", {"module": "echo", "task": "via mcp", "workspace": self.b.default_workspace})
                 self.assertFalse(res.is_error, res.content)
                 st = json.loads(res.content[0].text)
                 self.assertEqual(st["state"], "idle")
 
                 res = await client.call_tool("receive", {"from": st["id"], "reply_to": st["task_message_id"], "wait": 20})
                 got = json.loads(res.content[0].text)["messages"]
-                self.assertEqual([m["body"] for m in got], ["echo: via bridge"])
+                self.assertEqual([m["body"] for m in got], ["echo: via mcp"])
                 self.assertEqual(len(res.content), 1)  # receive never carries a notice
 
                 # other tool results say what is waiting, without consuming it
@@ -525,66 +526,12 @@ class BridgeTests(BrokerCase):
                 res = await client.call_tool("status", {"session": "does-not-exist"})
                 self.assertTrue(res.is_error)
 
-        ext = [s for s in self.b.broker.manager.sessions.values() if s.name == "codex-ext"][0]
-        for _ in range(50):  # the bridge unregisters on exit
+        ext = [s for s in self.b.broker.manager.sessions.values() if s.kind == "external"][0]
+        for _ in range(50):  # closing the MCP session ends the external session
             if ext.state == "terminated":
                 break
             await asyncio.sleep(0.1)
         self.assertEqual(ext.state, "terminated")
-
-    async def test_tool_list_follows_agora_tools(self):
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(BRIDGE), "--name", "limited",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self.b.bridge_env(AGORA_TOOLS="send,receive"),
-        )
-        try:
-            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n").encode())
-            await proc.stdin.drain()
-            listed = json.loads(await asyncio.wait_for(proc.stdout.readline(), 30))
-            self.assertEqual([t["name"] for t in listed["result"]["tools"]], ["send", "receive"])
-        finally:
-            proc.stdin.close()
-            await asyncio.wait_for(proc.wait(), 15)
-
-    async def test_channel_push(self):
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(BRIDGE), "--channel", "--name", "claude-ext", "--harness", "claude-code",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self.b.bridge_env(),
-        )
-
-        async def send(frame):
-            proc.stdin.write((json.dumps(frame) + "\n").encode())
-            await proc.stdin.drain()
-
-        async def read():
-            return json.loads(await asyncio.wait_for(proc.stdout.readline(), 30))
-
-        try:
-            await send({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}})
-            self.assertEqual((await read())["error"]["code"], -32601)  # modern clients fall back
-            await send({"jsonrpc": "2.0", "id": 2, "method": "initialize",
-                        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
-            init = (await read())["result"]
-            self.assertEqual(init["protocolVersion"], "2025-06-18")
-            self.assertIn("claude/channel", init["capabilities"]["experimental"])
-            await send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-            for _ in range(50):
-                names = [s["name"] for s in (await self.b.tool("list_sessions"))["sessions"]]
-                if "claude-ext" in names:
-                    break
-                await asyncio.sleep(0.1)
-            sent = await self.b.tool("send", to="claude-ext", body="ping from operator")
-            note = await read()
-            self.assertEqual(note["method"], "notifications/claude/channel")
-            self.assertEqual(note["params"]["content"], "ping from operator")
-            self.assertEqual(note["params"]["meta"]["from_id"], "operator@pc1")
-            self.assertEqual(note["params"]["meta"]["message_id"], sent["message_id"])
-        finally:
-            proc.stdin.close()
-            await asyncio.wait_for(proc.wait(), 15)
 
 
 if __name__ == "__main__":

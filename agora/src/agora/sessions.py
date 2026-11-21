@@ -8,7 +8,7 @@ center.
 States of a managed person:
     preparing → starting → idle ⇄ busy → terminated
                     └──────────┴────────→ failed
-External people (registered through the bridge) are "active" until they
+External people (MCP clients that joined with the broker key) are "active" until they
 unregister or are terminated. The operator (the place key holder, e.g. the
 `agora` CLI) is a permanent person named "operator".
 
@@ -605,10 +605,12 @@ class SessionManager:
                 self.store.add_secret("llm_key", s.llm_key)
                 env[url_var] = self.gateway.session_url
                 extra_secrets[key_var] = s.llm_key
-                if spec.network.proxy:  # the gateway is reached directly, not through the proxy
-                    host = urllib.parse.urlsplit(self.gateway.session_url).hostname or ""
-                    env["NO_PROXY"] = env["no_proxy"] = f"host.docker.internal,{host}"
                 self.store.record("session.llm_key", session_id=s.id, gateway=self.gateway.session_url, metadata=meta)
+            if spec.network.proxy:  # the place and the gateway are reached directly, not through the proxy
+                direct = ["host.docker.internal", urllib.parse.urlsplit(self.runner.broker_url).hostname or ""]
+                if self.gateway and spec.runtime.harness in HARNESS_ENV:
+                    direct.append(urllib.parse.urlsplit(self.gateway.session_url).hostname or "")
+                env["NO_PROXY"] = env["no_proxy"] = ",".join(h for h in direct if h)
             s.handle = await self.runner.start(s.id, spec, bundle, env, stderr_path, secrets=extra_secrets)
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
@@ -635,20 +637,18 @@ class SessionManager:
             )
             await s.acp.initialize()
             mcp_servers: list[dict[str, Any]] = []
-            tools = spec.runtime.broker_tools
-            if tools:
-                bridge_env = [
-                    {"name": "AGORA_BROKER_URL", "value": s.handle.broker_url},
-                    {"name": "AGORA_TOKEN", "value": s.token},
-                ]
-                if set(tools) != set(BROKER_TOOLS):
-                    bridge_env.append({"name": "AGORA_TOOLS", "value": ",".join(tools)})
+            if spec.runtime.broker_tools:
+                caps = (s.acp.agent_info.get("agentCapabilities") or {}).get("mcpCapabilities") or {}
+                if not caps.get("http"):
+                    raise BrokerError("this harness cannot reach agora: its ACP adapter takes no HTTP MCP servers")
+                # agora's tools: this place's MCP endpoint, with the session's token.
+                # Which tools the session gets is decided by the place, from the token.
                 mcp_servers.append(
                     {
+                        "type": "http",
                         "name": BRIDGE_SERVER,
-                        "command": s.handle.bridge_command[0],
-                        "args": s.handle.bridge_command[1:],
-                        "env": bridge_env,
+                        "url": f"{s.handle.broker_url}/mcp",
+                        "headers": [{"name": "Authorization", "value": f"Bearer {s.token}"}],
                     }
                 )
             names = [m["name"] for m in mcp_servers]

@@ -37,6 +37,14 @@ v0.6 からは、セッションを「人」、マシンごとのデーモンを
 - **履歴の閲覧権限**：v0.6 から誰でも誰の履歴でも読める（考えは開かれている）。v0.5 までは、セッションが読めるのは自分・自分が起動したセッション・参加したスレッドだけだった。
 - **待ち受け先**：docker ランナーでは、場所は 127.0.0.1 と `hb-net` のゲートウェイ IP の両方で待ち受ける。別のマシンから届かせるには `listen_host` を開ける。
 
+## v0.12.0（2026-11-21）：場所が MCP を HTTP で直接話す
+
+- これまでは、セッションごとに stdio の MCP サーバー（`bridge.py`）を起動し、それが独自の HTTP API（`/api/tools/<tool>`）で daemon に転送していた。v0.1 からの設計を引き継いでいたもので、理由は Claude Code の Channels（押し込み）と、どのハーネスでも stdio なら動くことだった。ユーザーの反応：「めちゃくちゃバカな作りに見える。切り替えで。」
+- daemon が `/mcp` で MCP（Streamable HTTP、JSON 応答）を直接話すようにした。管理下セッションには URL とトークン（`Authorization: Bearer`）を ACP の `session/new` で渡す。使えるツールは場所がトークンから決める。ハーネスの ACP アダプタが HTTP の MCP に対応していない（`mcpCapabilities.http` がない）と起動を失敗させる。
+- 外部セッションは、ブローカーの鍵で `/mcp` に `initialize` すると登録され、トークンが `Mcp-Session-Id` で返る。MCP のセッションを閉じる（DELETE）と終わる。
+- `agora call` も `/mcp` の `tools/call` を使う。`/api/register`、`/api/tools`、`X-Agora-Unread`、`agora mcp`、`bridge.py`、Channels での押し込み、外部セッション側でのツールの絞り込み（`AGORA_TOOLS`）はなくなった。
+- agora-pi は Node の fetch ではなく `node:http` で接続する。Node の fetch は応答ヘッダーを 300 秒しか待たず、`receive` の最長 600 秒に足りないため。
+
 ## v0.11.0（2026-11-20）：pi は SDK で動かす、要件は LiteLLM で判定する
 
 - ユーザーの指摘：「会話と記録などは、ハーネスに聞くのではなく、litellmから作った方がより信頼性高いのでは？」「隔離を何のためにやっていたか考えて欲しい」。隔離の目的は、モデルの文脈をハーネスとモジュールと依頼だけにすること。要件書を、手段（どのファイルを読まないか）ではなく、モデルに何が渡るかで書き直し、判定は LiteLLM の記録で行うことにした。

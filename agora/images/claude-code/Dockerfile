@@ -20,9 +20,8 @@ RUN apt-get update \
  && npm cache clean --force \
  && useradd --create-home --uid 10001 --shell /bin/sh agent
 
-COPY src/agora/bridge.py /opt/agora/agora_bridge.py
 COPY images/common/entrypoint.sh /opt/agora/entrypoint.sh
-RUN chmod 0755 /opt/agora/entrypoint.sh /opt/agora/agora_bridge.py
+RUN chmod 0755 /opt/agora/entrypoint.sh
 
 ENV DISABLE_AUTOUPDATER=1
 WORKDIR /workspace

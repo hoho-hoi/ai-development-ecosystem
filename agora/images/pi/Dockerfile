@@ -20,9 +20,8 @@ RUN apt-get update \
  && useradd --create-home --uid 10001 --shell /bin/sh agent
 
 COPY images/pi/agora-pi.mjs /opt/agora-pi/agora-pi.mjs
-COPY src/agora/bridge.py /opt/agora/agora_bridge.py
 COPY images/common/entrypoint.sh /opt/agora/entrypoint.sh
-RUN chmod 0755 /opt/agora/entrypoint.sh /opt/agora/agora_bridge.py \
+RUN chmod 0755 /opt/agora/entrypoint.sh \
  && printf '#!/bin/sh\nexec node /opt/agora-pi/agora-pi.mjs "$@"\n' > /usr/local/bin/agora-pi \
  && chmod 0755 /usr/local/bin/agora-pi
 

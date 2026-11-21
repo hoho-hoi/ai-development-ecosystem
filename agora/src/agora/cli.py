@@ -2,7 +2,6 @@
 
     agora daemon   [--config agora.yaml]           run this machine's place
     agora place    [--config agora.yaml]           show this place's name and key, as a peer entry for other places
-    agora mcp      [bridge options]             run the stdio MCP bridge (for a harness's MCP config)
     agora modules  [--config agora.yaml] [DIR…]    validate modules and show their runtime and fingerprint
     agora call TOOL [JSON] [--config agora.yaml]   call a broker tool as the operator
     agora codex-login [--status] [--device-auth] [--config agora.yaml]
@@ -90,22 +89,32 @@ def _cmd_place(a: argparse.Namespace) -> None:
 
 
 def _cmd_call(a: argparse.Namespace) -> None:
+    """Call one tool on this place's MCP endpoint as the operator."""
     cfg = load_config(a.config)
     key = ensure_broker_key(cfg)
     args = json.loads(a.json) if a.json else {}
+    frame = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": a.tool, "arguments": args}}
     req = urllib.request.Request(
-        f"{cfg.local_url}/api/tools/{a.tool}",
-        data=json.dumps(args).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        f"{cfg.local_url}/mcp",
+        data=json.dumps(frame).encode(),
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                 "Authorization": f"Bearer {key}"},
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=float(args.get("wait_timeout", 0)) + float(args.get("wait", 0)) + 120) as r:
-            print(json.dumps(json.loads(r.read()), ensure_ascii=False, indent=2))
+            reply = json.loads(r.read())
     except urllib.error.HTTPError as e:
         print(e.read().decode(errors="replace"), file=sys.stderr)
         sys.exit(1)
+    if "error" in reply:
+        sys.exit(reply["error"].get("message"))
+    result = reply["result"]
+    text = result["content"][0]["text"]
+    if result.get("isError"):
+        sys.exit(text)
+    print(text)
 
 
 def _cmd_codex_login(a: argparse.Namespace) -> None:
@@ -143,12 +152,6 @@ def _cmd_codex_login(a: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "mcp":
-        from .bridge import main as bridge_main
-
-        bridge_main(argv[1:])
-        return
-
     ap = argparse.ArgumentParser(prog="agora", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("daemon", help="run this machine's place")
@@ -171,7 +174,6 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device-auth", action="store_true", help="use the device-code flow instead of a browser")
     p.add_argument("--config", type=Path)
     p.set_defaults(fn=_cmd_codex_login)
-    sub.add_parser("mcp", help="run the stdio MCP bridge (see agora mcp --help)")
     a = ap.parse_args(argv)
     a.fn(a)
 

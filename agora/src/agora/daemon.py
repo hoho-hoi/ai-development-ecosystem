@@ -1,16 +1,18 @@
-"""A place: the daemon that runs on one machine, an HTTP API in front of
-the SessionManager.
+"""A place: the daemon that runs on one machine, in front of the
+SessionManager.
 
-Residents reach it through the stdio bridge (bridge.py) that each of them
-runs; the bridge forwards every tool call here as POST /api/tools/<tool> with
-the resident's bearer token. The operator authenticates with the broker key.
+Everyone reaches it as an MCP server over HTTP at /mcp (Streamable HTTP,
+JSON responses). Managed sessions use their session token as the bearer
+token. The operator uses the broker key; an MCP client that initializes with
+the broker key joins as an external session, whose token comes back as the
+Mcp-Session-Id.
 
 Other places reach it at /federation/* with requests signed by their place
 key (federation.py). A tool call that names someone or somewhere in another
 place is forwarded there, once: places never relay for a third place.
 
-Every tool response except receive carries an X-Agora-Unread header when the
-caller has unread messages: JSON {"count": n, "from": [{session, name, count}]}.
+Every tool result except receive's says how many unread messages the caller
+has, and from whom.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from typing import Any, AsyncIterator
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from . import __version__
@@ -41,6 +43,7 @@ from .runner.docker import DockerRunner, network_gateway
 from .runner.local import LocalRunner
 from .sessions import LIVE, BrokerError, Forbidden, NotFound, Session, SessionManager
 from .store import HistoryStore
+from .tools import HANDSHAKE_VERSIONS, INSTRUCTIONS, TOOL_SCHEMAS, render_notice
 
 log = logging.getLogger(__name__)
 
@@ -282,52 +285,109 @@ class Broker:
         except (KeyError, ValueError, TypeError) as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
 
-    async def register(self, request: Request) -> JSONResponse:
-        try:
-            if not self._is_operator(self._bearer(request)):
-                raise Forbidden("registration requires the broker key")
-            body = await request.json()
-            s = self.manager.register_external(
-                str(body.get("name") or "external"),
-                body.get("harness"),
-                body.get("cwd"),
-                bool(body.get("channel")),
-            )
-            return JSONResponse({"session_id": s.id, "name": s.name, "token": s.token})
-        except BrokerError as e:
-            return JSONResponse({"error": str(e)}, status_code=e.status)
+    # --- MCP over HTTP ---------------------------------------------------------
+    async def run_tool(self, caller: Session, tool: str, args: Any) -> Any:
+        """Check and run one tool call for `caller`."""
+        if tool not in TOOLS:
+            raise BrokerError(f"unknown tool {tool!r}")
+        if caller.tools is not None and tool not in caller.tools and tool != "whoami":
+            raise Forbidden(f"{tool} is not among this session's tools ({', '.join(sorted(caller.tools)) or 'none'})")
+        if not isinstance(args, dict):
+            raise BrokerError("arguments must be a JSON object")
+        allowed, required = TOOLS[tool]
+        unknown = set(args) - allowed
+        missing = required - {k for k, v in args.items() if v not in (None, "")}
+        if unknown:
+            raise BrokerError(f"unknown argument(s) for {tool}: {sorted(unknown)}")
+        if missing:
+            raise BrokerError(f"missing argument(s) for {tool}: {sorted(missing)}")
+        if tool != "receive":  # polling noise; what was received is in message.deliver
+            self.store.record("api.call", session_id=caller.id, tool=tool, args=args)
+        return await self.call_tool(caller, tool, args)
 
-    async def tool(self, request: Request) -> JSONResponse:
-        tool = request.path_params["tool"]
-        try:
-            caller = self.caller(request)
-            if tool not in TOOLS:
-                raise BrokerError(f"unknown tool {tool!r}")
-            if caller.tools is not None and tool not in caller.tools and tool != "whoami":
-                raise Forbidden(f"{tool} is not among this session's tools ({', '.join(sorted(caller.tools)) or 'none'})")
-            args = await request.json() if await request.body() else {}
-            if not isinstance(args, dict):
-                raise BrokerError("arguments must be a JSON object")
-            allowed, required = TOOLS[tool]
-            unknown = set(args) - allowed
-            missing = required - {k for k, v in args.items() if v not in (None, "")}
-            if unknown:
-                raise BrokerError(f"unknown argument(s) for {tool}: {sorted(unknown)}")
-            if missing:
-                raise BrokerError(f"missing argument(s) for {tool}: {sorted(missing)}")
-            if tool != "receive":  # polling noise; what was received is in message.deliver
-                self.store.record("api.call", session_id=caller.id, tool=tool, args=args)
-            result = await self.call_tool(caller, tool, args)
-            headers = {}
-            if tool != "receive":
-                notice = self.manager.unread_notice(caller)
+    async def _mcp_frame(self, frame: Any, caller: Session | None, operator: bool) -> tuple[dict[str, Any] | None, str | None]:
+        """One JSON-RPC frame. Returns (response or None for a notification,
+        the Mcp-Session-Id of an external session it registered)."""
+        if not isinstance(frame, dict) or "method" not in frame:
+            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}, None
+        rid, method, params = frame.get("id"), frame["method"], frame.get("params") or {}
+        if rid is None:
+            return None, None  # notifications/initialized and the like
+        ok = lambda result: {"jsonrpc": "2.0", "id": rid, "result": result}  # noqa: E731
+        new_sid = None
+        if method == "initialize":
+            if operator and caller is None:  # an MCP client joining with the broker key
+                info = params.get("clientInfo") or {}
+                caller = self.manager.register_external(str(info.get("name") or "external"), info.get("name"), None, False)
+                new_sid = caller.token
+            wanted = params.get("protocolVersion")
+            return ok({
+                "protocolVersion": wanted if wanted in HANDSHAKE_VERSIONS else HANDSHAKE_VERSIONS[0],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "agora", "version": __version__},
+                "instructions": INSTRUCTIONS,
+            }), new_sid
+        if method == "ping":
+            return ok({}), None
+        who = caller or self.manager.operator
+        if method == "tools/list":
+            tools = [t for t in TOOL_SCHEMAS if who.tools is None or t["name"] in who.tools]
+            return ok({"tools": tools}), None
+        if method == "tools/call":
+            name = str(params.get("name") or "")
+            try:
+                result = await self.run_tool(who, name, params.get("arguments") or {})
+            except BrokerError as e:
+                text = f"agora error {e.status}: {e}"
+                return ok({"content": [{"type": "text", "text": text}], "isError": True}), None
+            except (KeyError, ValueError, TypeError) as e:
+                return ok({"content": [{"type": "text", "text": f"agora error 400: {type(e).__name__}: {e}"}],
+                           "isError": True}), None
+            content = [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+            if name != "receive":
+                notice = self.manager.unread_notice(who)
                 if notice:
-                    headers["X-Agora-Unread"] = json.dumps(notice)  # ASCII-only, safe as a header
-            return JSONResponse(result, headers=headers)
+                    content.append({"type": "text", "text": render_notice(notice)})
+            return ok({"content": content, "isError": False}), None
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"method not found: {method}"}}, None
+
+    async def mcp(self, request: Request) -> Response:
+        try:
+            token = self._bearer(request)
+            operator = self._is_operator(token)
+            sid = request.headers.get("mcp-session-id")
+            if sid:  # an external session that joined with the broker key, or a managed one
+                if not (operator or hmac.compare_digest(sid.encode(), token.encode())):
+                    raise Forbidden("Mcp-Session-Id does not match the bearer token")
+                caller: Session | None = self.manager.by_token(sid)
+            else:
+                caller = None if operator else self.manager.by_token(token)
         except BrokerError as e:
             return JSONResponse({"error": str(e)}, status_code=e.status)
-        except (KeyError, ValueError, TypeError) as e:
-            return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
+        if request.method == "GET":
+            return Response(status_code=405)  # no server-initiated stream
+        if request.method == "DELETE":
+            if caller is not None and caller.kind == "external":
+                await self.manager.terminate(caller, caller.id, "MCP session closed")
+            return Response(status_code=200)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
+                                status_code=400)
+        frames = body if isinstance(body, list) else [body]
+        replies, new_sid = [], None
+        for frame in frames:
+            reply, registered = await self._mcp_frame(frame, caller, operator)
+            if registered:
+                new_sid = registered
+                caller = self.manager.by_token(registered)
+            if reply is not None:
+                replies.append(reply)
+        if not replies:
+            return Response(status_code=202)
+        headers = {"Mcp-Session-Id": new_sid} if new_sid else {}
+        return JSONResponse(replies if isinstance(body, list) else replies[0], headers=headers)
 
     def app(self) -> Starlette:
         @contextlib.asynccontextmanager
@@ -355,8 +415,7 @@ class Broker:
                 Route("/api/health", self.health, methods=["GET"]),
                 Route("/api/place", self.place, methods=["GET"]),
                 Route("/federation/{op}", self.federation_endpoint, methods=["POST"]),
-                Route("/api/register", self.register, methods=["POST"]),
-                Route("/api/tools/{tool}", self.tool, methods=["POST"]),
+                Route("/mcp", self.mcp, methods=["POST", "GET", "DELETE"]),
             ],
             lifespan=lifespan,
         )
