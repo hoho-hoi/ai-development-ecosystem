@@ -7,6 +7,7 @@ The fake agent answers the way every agent must: with send(reply_to=...).
 import asyncio
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -362,6 +363,29 @@ class ModuleRunTests(BrokerCase):
         mod = self.b.events(session=st["id"], kinds=["session.module"])[0]["payload"]
         self.assertEqual(mod["source"]["path"], "peer")
         self.assertEqual(len(mod["source"]["ref"]), 40)
+
+    async def test_spawn_a_module_at_another_path_of_a_registered_repository(self):
+        # a new module written next to the registered peer, at a later commit, not registered
+        mrepo = self.tmp / "module-repo"
+        shutil.copytree(mrepo / "peer", mrepo / "fresh")
+        manifest = json.loads((mrepo / "peer" / "plugin.json").read_text())
+        manifest.update({"name": "fresh", "description": "a module being written", "version": "1"})
+        (mrepo / "fresh" / "plugin.json").write_text(json.dumps(manifest))
+        (mrepo / "fresh" / NS / "AGENTS.md").write_text("You are fresh.\n")
+        git(mrepo, "add", "-A")
+        git(mrepo, "commit", "-q", "-m", "fresh")
+        commit = git(mrepo, "rev-parse", "HEAD")
+        st = await self.b.tool("spawn", module="peer", module_ref=commit, module_path="fresh", wait=True)
+        self.assertEqual((st["state"], st["module"]), ("idle", "fresh@1"), st)
+        _, r = await self.ask(st["id"], "INSTRUCTIONS")
+        self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are fresh.\n")
+        spawn = self.b.events(session=st["id"], kinds=["session.spawn"])[0]["payload"]
+        self.assertEqual(spawn["module_path_override"], "fresh")
+        # only inside the repository, and only for a module registered from one
+        code, _ = await self.b.call("spawn", {"module": "peer", "module_path": "../outside"})
+        self.assertEqual(code, 400)
+        code, _ = await self.b.call("spawn", {"module": "mod", "module_path": "fresh"})
+        self.assertEqual(code, 400)
 
     async def test_spawn_with_a_candidate_module_commit(self):
         # a candidate version of the peer module, committed after the pinned one

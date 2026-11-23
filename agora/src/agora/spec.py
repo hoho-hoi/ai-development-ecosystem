@@ -358,20 +358,26 @@ class Catalog:
     def errors(self) -> dict[str, str]:
         return self._load_all(fetch=True)[1]
 
-    def get(self, name: str, *, module_ref: str | None = None, workspace: Workspace | None = None) -> Spec:
+    def get(self, name: str, *, module_ref: str | None = None, module_path: str | None = None,
+            workspace: Workspace | None = None) -> Spec:
+        """A registered module; with module_ref, another commit of its repository;
+        with module_path, the module at another path of its repository (e.g. a
+        module being written, not registered yet)."""
         found, errors = self._load_all(fetch=True)
         if name not in found:
             hint = f" (load errors: {errors})" if errors else ""
             raise KeyError(f"unknown module {name!r}{hint}")
         src, mod = found[name]
-        if module_ref:
+        if module_ref or module_path:
             if not src.repo:
-                raise SpecError("module_ref needs a module registered from a repository")
-            if not COMMIT_RE.match(module_ref):
+                raise SpecError("module_ref and module_path need a module registered from a repository")
+            if module_ref and not COMMIT_RE.match(module_ref):
                 raise SpecError("module_ref must be a full commit SHA")
-            src = src.model_copy(update={"ref": module_ref})
+            if module_path:
+                check_relative(module_path, "module_path")
+            src = src.model_copy(update={"ref": module_ref or src.ref, "path": module_path or src.path})
             mod = self._load(src)
-            if mod.plugin.name != name:
+            if not module_path and mod.plugin.name != name:
                 raise SpecError(f"module_ref {module_ref[:12]} holds module {mod.plugin.name!r}, not {name!r}")
         return resolve(mod, src, workspace=workspace, network=self.network, harnesses=self.harnesses)
 

@@ -52,7 +52,8 @@ log = logging.getLogger(__name__)
 TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_modules": ({"place"}, set()),
-    "spawn": ({"module", "task", "workspace", "module_ref", "name", "wait", "wait_timeout", "place"}, {"module"}),
+    "spawn": ({"module", "task", "workspace", "module_ref", "module_path", "name", "wait", "wait_timeout", "place"},
+              {"module"}),
     "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
     "send": ({"to", "body", "thread_id", "reply_to"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
@@ -176,7 +177,7 @@ class Broker:
                 return await m.spawn(
                     caller, args["module"], task=args.get("task"), workspace=args.get("workspace"),
                     name=args.get("name"), wait=bool(args.get("wait", True)), wait_timeout=wait, place=place,
-                    module_ref=args.get("module_ref"),
+                    module_ref=args.get("module_ref"), module_path=args.get("module_path"),
                 )
             return await m.forward(caller, place, tool, args, timeout=wait + 120)
         if tool == "whoami":
@@ -199,6 +200,7 @@ class Broker:
                 wait=bool(args.get("wait", True)),
                 wait_timeout=float(args.get("wait_timeout", 600)),
                 module_ref=args.get("module_ref"),
+                module_path=args.get("module_path"),
             )
         if tool == "clone":
             target = caller.id if args["session"] == "self" else args["session"]

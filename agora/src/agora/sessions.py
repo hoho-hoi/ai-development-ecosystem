@@ -444,11 +444,12 @@ class SessionManager:
         wait_timeout: float = 600,
         place: str | None = None,
         module_ref: str | None = None,
+        module_path: str | None = None,
     ) -> dict[str, Any]:
         if place and place != self.place:
             # Born elsewhere; the task is then an ordinary signed message from the caller.
             args = {"module": module, "workspace": workspace, "name": name, "wait": wait,
-                    "wait_timeout": wait_timeout, "module_ref": module_ref}
+                    "wait_timeout": wait_timeout, "module_ref": module_ref, "module_path": module_path}
             st = await self.forward(caller, place, "spawn", {k: v for k, v in args.items() if v is not None},
                                     timeout=wait_timeout + 60)
             task_message_id = None
@@ -460,7 +461,8 @@ class SessionManager:
         except Exception as e:
             raise BrokerError(f"bad workspace: {e}") from None
         try:
-            spec = await asyncio.to_thread(self.catalog.get, module, module_ref=module_ref, workspace=ws)
+            spec = await asyncio.to_thread(self.catalog.get, module, module_ref=module_ref, module_path=module_path,
+                                           workspace=ws)
         except KeyError as e:
             raise NotFound(str(e)) from None
         except ValueError as e:  # SpecError, ModuleError
@@ -474,6 +476,7 @@ class SessionManager:
             fingerprint=spec.fingerprint,
             task=task,
             module_ref_override=module_ref,
+            module_path_override=module_path,
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )

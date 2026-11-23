@@ -64,6 +64,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "workspace": {"type": "object", "description": "Repository the session works in: {repo, ref (full commit SHA)}",
                               "properties": {"repo": S, "ref": S}},
                 "module_ref": {**S, "description": "Full commit SHA of the module's repository to run instead of the registered one (e.g. a candidate version)"},
+                "module_path": {**S, "description": "Path of another module in the same repository as `module`, to run that module instead (e.g. one being written and not registered yet); with module_ref, at that commit"},
                 "name": {**S, "description": "Session name (defaults to the module id)"},
                 "wait": {"type": "boolean", "description": "Wait until the session is ready (default true)"},
                 "wait_timeout": {"type": "number", "description": "Seconds to wait (default 600)"},
