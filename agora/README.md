@@ -154,14 +154,15 @@ telemetry:
   phoenix_mcp_url: http://127.0.0.1:6006/mcp       # history ツールが中継する Phoenix の MCP
 ```
 
+ターンごとに 1 つのトレースにしています。Phoenix のセッションの画面では、セッションが会話（各ターンの入力と出力）として並びます。
+
 | スパン | 内容 |
 | --- | --- |
-| `invoke_agent <モジュール>` | 1セッション。spawn されたセッションは、起動したセッションの子になる（1本の木）。属性：`gen_ai.agent.name`、`gen_ai.request.model`、版、fingerprint、ハーネス |
-| `turn` | 1ターン。渡した文面（`input.value`）と、エージェントが最後に書いた文章（`output.value`。誰にも届けていない） |
+| `turn <モジュール>` | 1ターン。トレースの一番上。渡した文面（`input.value`）と、エージェントが最後に書いた文章（`output.value`。誰にも届けていない） |
 | LLM の呼び出し | LiteLLM が送るもの。指示・会話・ツール呼び出し・トークン・費用。ハーネスがターンの `traceparent` を付けて呼ぶので、ターンの子になる |
-| 出来事（`message.send`、`session.spawn` など） | 1件ずつ短いスパン。中身は `agora.payload`（JSON） |
+| 出来事（`message.send`、`session.spawn` など） | 1件ずつ短いスパン。ターンの中ならその子、ターンの外（起動・終了・メッセージの到着など）なら、それだけで1つのトレース（`input.value` が出来事の名前、`output.value` が中身）。中身は `agora.payload`（JSON） |
 
-すべてのスパンに `session.id`（セッションの id）が付きます。
+すべてのスパンに `session.id`（セッションの id）と、モジュール・版・モデル・ハーネスが付きます。spawn されたセッションのスパンには、起動したセッションが `agora.parent` として付きます。
 
 - **LLM の呼び出しをターンにつなぐ**：agora は ACP の `session/prompt` の `_meta.traceparent` にターンの印を入れます。アダプタはそれを LLM へのリクエストのヘッダーに付けます（agora-pi は対応済み）。LiteLLM は `arize_phoenix` のコールバックで Phoenix に送ります（`LITELLM_OTEL_V2=true`、会話の中身を送るには `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only`）。
 - **人が見る**：Phoenix の画面で、セッションの木、ターン、LLM の呼び出しの中身を見られます。

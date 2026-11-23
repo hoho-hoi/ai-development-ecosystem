@@ -621,20 +621,30 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
                       [(p, b) for p, b, _ in self.gw.requests])
 
-    async def test_spawned_sessions_form_one_trace(self):
+    async def test_each_turn_is_a_trace_of_its_session(self):
         st = await self.b.tool("spawn", module="echo", wait=True)
         r = json.loads(await self.ask(st["id"], 'BRIDGE spawn {"module": "peer", "wait": true}'))
         child = json.loads(r["content"][0]["text"])["id"]
+        await self.ask(child, "hello peer")
         await self.b.tool("terminate", session=child)
         await self.b.tool("terminate", session=st["id"])
-        spans = {s.name: s for s in self.spans.get_finished_spans()}
-        parent, kid = spans["invoke_agent echo"], spans["invoke_agent peer"]
-        self.assertEqual(kid.parent.span_id, parent.context.span_id)  # the spawned session hangs under its parent
-        self.assertEqual(kid.context.trace_id, parent.context.trace_id)
-        self.assertEqual(parent.attributes["gen_ai.request.model"], "test-model-1")
-        turns = [s for s in self.spans.get_finished_spans() if s.name == "turn" and s.parent.span_id == parent.context.span_id]
+        done = self.spans.get_finished_spans()
+        turns = [s for s in done if s.name == "turn echo"]
         self.assertTrue(turns)
-        sends = [s for s in self.spans.get_finished_spans() if s.name == "message.send"
-                 and s.attributes["session.id"] == st["id"]]
-        self.assertTrue(sends)  # echo answered with send, recorded under its session
-        self.assertEqual(turns[0].attributes["input.value"].split("\n")[0], "from: operator@pc1")
+        turn = turns[0]
+        # a root of its own, shown as a conversation: what was given and what was written
+        self.assertIsNone(turn.parent)
+        self.assertEqual(turn.attributes["session.id"], st["id"])
+        self.assertEqual(turn.attributes["input.value"].split("\n")[0], "from: operator@pc1")
+        self.assertIn("output.value", turn.attributes)
+        self.assertEqual(turn.attributes["gen_ai.request.model"], "test-model-1")
+        # events during the turn hang under it
+        sends = [s for s in done if s.name == "message.send" and s.attributes["session.id"] == st["id"]]
+        self.assertTrue(sends and all(s.parent is not None for s in sends))
+        # the spawned session's turns are their own traces, linked by agora.parent
+        kid = [s for s in done if s.name == "turn peer"][0]
+        self.assertIsNone(kid.parent)
+        self.assertEqual((kid.attributes["session.id"], kid.attributes["agora.parent"]), (child, f"{st['id']}@pc1"))
+        # events outside a turn are roots that say what they are
+        ends = [s for s in done if s.name == "session.end" and s.attributes["session.id"] == child]
+        self.assertTrue(ends and ends[0].parent is None and ends[0].attributes["input.value"] == "session.end")

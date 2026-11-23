@@ -1,18 +1,23 @@
 """agora's history, sent as OpenTelemetry traces to the place's trace store
 (Phoenix). agora keeps no history of its own: only the state it runs on.
 
-  invoke_agent <module>   one per session; a spawned session is a child of
-                          the session that spawned it
-    turn                  one per prompt turn: the text given (input.value)
-                          and the text written at its end (output.value).
-                          The harness passes the turn's traceparent on to the
-                          LLM gateway, so its LLM calls nest here.
-    <event kind>          one short span per event (message.send,
-                          session.spawn, session.model, ...): the event's
-                          payload as JSON in agora.payload
+One trace per turn, so a trace store shows a session as a conversation
+(Phoenix groups traces by session.id and lists each root's input and output):
 
-Every span carries session.id (the session's id), which the store uses to
-group a session's traces.
+  turn <module>           the root: the text given (input.value) and the text
+                          written at its end (output.value). The harness passes
+                          the turn's traceparent on to the LLM gateway, so its
+                          LLM calls nest here.
+    <event kind>          events during the turn (message.send, session.spawn,
+                          ...): one short span each, payload JSON in agora.payload
+  <event kind>            events outside any turn (a session starting or
+                          ending, mail arriving): a short root span of its own,
+                          with the event as input.value and the payload as
+                          output.value
+
+Every span carries session.id (the session's id) and the session's module,
+version, model and harness; a spawned session's spans carry agora.parent (the
+session that spawned it).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+    from opentelemetry.context import Context
     from opentelemetry.trace import Status, StatusCode, set_span_in_context
     from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 except ImportError:  # telemetry is optional
@@ -35,7 +41,7 @@ class Telemetry:
 
     def __init__(self, endpoint: str | None = None, place: str = "", exporter: Any = None):
         self.enabled = bool(endpoint or exporter)
-        self._spans: dict[str, Any] = {}  # session id -> session span
+        self._sessions: dict[str, dict[str, Any]] = {}  # session id -> attributes for its spans
         self._turns: dict[str, Any] = {}  # session id -> current turn span
         if not self.enabled:
             return
@@ -50,41 +56,29 @@ class Telemetry:
             self.provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         self.tracer = self.provider.get_tracer("agora")
 
-    def _parent(self, session_id: str | None) -> Any:
-        if not session_id:
-            return None
-        return self._turns.get(session_id) or self._spans.get(session_id)
+    def _attrs(self, session_id: str | None) -> dict[str, Any]:
+        return {"session.id": session_id, **self._sessions.get(session_id or "", {})}
 
     def session_start(self, session_id: str, parent_id: str | None, attrs: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-        parent = self._spans.get(parent_id or "")
-        ctx = set_span_in_context(parent) if parent is not None else None
-        name = f"invoke_agent {attrs.get('gen_ai.agent.name', '')}".strip()
-        self._spans[session_id] = self.tracer.start_span(name, context=ctx, attributes={
-            "gen_ai.operation.name": "invoke_agent", "openinference.span.kind": "AGENT", "session.id": session_id,
-            **_clean(attrs)})
+        if self.enabled:
+            self._sessions[session_id] = _clean(attrs)
 
     def session_end(self, session_id: str, state: str, reason: str) -> None:
         if not self.enabled:
             return
         turn = self._turns.pop(session_id, None)
         if turn is not None:
-            turn.end()
-        span = self._spans.pop(session_id, None)
-        if span is not None:
-            span.set_attribute("agora.session.state", state)
-            span.set_attribute("agora.session.end_reason", reason)
             if state == "failed":
-                span.set_status(Status(StatusCode.ERROR, reason))
-            span.end()
+                turn.set_status(Status(StatusCode.ERROR, reason))
+            turn.end()
+        self._sessions.pop(session_id, None)
 
     def turn_start(self, session_id: str, text: str, attrs: dict[str, Any]) -> None:
-        if not self.enabled or session_id not in self._spans:
+        if not self.enabled:
             return
-        ctx = set_span_in_context(self._spans[session_id])
-        self._turns[session_id] = self.tracer.start_span("turn", context=ctx, attributes={
-            "openinference.span.kind": "CHAIN", "session.id": session_id, "input.value": text, **_clean(attrs)})
+        name = f"turn {self._sessions.get(session_id, {}).get('gen_ai.agent.name', '')}".strip()
+        self._turns[session_id] = self.tracer.start_span(name, context=Context(), attributes=_clean({
+            "openinference.span.kind": "AGENT", "input.value": text, **self._attrs(session_id), **attrs}))
 
     def turn_end(self, session_id: str, text: str, attrs: dict[str, Any]) -> None:
         if not self.enabled:
@@ -108,14 +102,18 @@ class Telemetry:
 
     def record(self, kind: str, session_id: str | None, thread_id: str | None, message_id: str | None,
                payload: dict[str, Any]) -> None:
-        """One event, as a short span under the session's turn (or session)."""
+        """One event: a short span under the session's current turn, or a root
+        of its own outside a turn."""
         if not self.enabled:
             return
-        parent = self._parent(session_id)
-        ctx = set_span_in_context(parent) if parent is not None else None
-        attrs = {"openinference.span.kind": "CHAIN", "agora.event": kind, "session.id": session_id,
+        body = json.dumps(payload, ensure_ascii=False, default=str)
+        turn = self._turns.get(session_id or "")
+        attrs = {"openinference.span.kind": "CHAIN", "agora.event": kind, **self._attrs(session_id),
                  "agora.session_id": session_id, "agora.thread_id": thread_id, "agora.message_id": message_id,
-                 "agora.payload": json.dumps(payload, ensure_ascii=False, default=str)}
+                 "agora.payload": body}
+        if turn is None:  # a trace of its own: say what it is where a viewer shows a trace
+            attrs.update({"input.value": kind, "output.value": body})
+        ctx = set_span_in_context(turn) if turn is not None else Context()
         self.tracer.start_span(kind, context=ctx, attributes=_clean(attrs)).end()
 
     def shutdown(self) -> None:
