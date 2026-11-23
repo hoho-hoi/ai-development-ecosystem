@@ -61,6 +61,7 @@ from .harness import (
     harness_record_dir,
     prepare_harness_config,
     resolve_definition,
+    session_meta,
 )
 from .identity import OPERATOR, Key, message_bytes, session_id_for, split_address, verify
 from .jsonrpc import ConnectionClosed, RpcError
@@ -675,11 +676,11 @@ class SessionManager:
             if load:
                 if not (s.acp.agent_info.get("agentCapabilities") or {}).get("loadSession"):
                     raise BrokerError("this harness cannot resume a conversation (no ACP loadSession); clone needs it")
-                await s.acp.load_session(load, s.handle.workspace_path, mcp_servers)
+                await s.acp.load_session(load, s.handle.workspace_path, mcp_servers, meta=session_meta(spec))
                 s.acp_session_id = load
             else:
                 s.acp_session_id, choice = await s.acp.new_session(
-                    s.handle.workspace_path, mcp_servers, model=harness_model_id(spec)
+                    s.handle.workspace_path, mcp_servers, model=harness_model_id(spec), meta=session_meta(spec)
                 )
                 if choice:
                     self.store.record("session.model", session_id=s.id, **choice)
@@ -710,7 +711,9 @@ class SessionManager:
             except Exception as e:
                 self.store.record("session.error", session_id=s.id, stage="session_close", error=repr(e))
         assert s.spec is not None
-        s.acp_session_id, _ = await s.acp.new_session(s.handle.workspace_path, s.mcp_servers, model=harness_model_id(s.spec))
+        s.acp_session_id, _ = await s.acp.new_session(
+            s.handle.workspace_path, s.mcp_servers, model=harness_model_id(s.spec), meta=session_meta(s.spec)
+        )
         self.store.record("session.conversation", session_id=s.id, acp_session_id=s.acp_session_id, previous=old)
 
     async def _watch_process(self, s: Session) -> None:

@@ -33,23 +33,9 @@ from .modules import (
     load_local,
 )
 
-# Files and directories removed from every workspace, at any depth. These are
-# where harnesses pick up project-level instructions, skills, MCP servers and
-# settings.
-DEFAULT_STRIP: tuple[str, ...] = (
-    "CLAUDE.md",
-    "CLAUDE.local.md",
-    ".claude",
-    ".mcp.json",
-    "AGENTS.md",
-    "AGENTS.override.md",
-    ".codex",
-    "GEMINI.md",
-    ".gemini",
-    ".opencode",
-    ".pi",
-    ".agents",
-)
+# A module's own image layer, next to plugin.json: built on the harness image
+# (build argument BASE) by the docker runner.
+MODULE_DOCKERFILE = "Dockerfile"
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # SHA-1 or SHA-256 object ids
 ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -63,7 +49,7 @@ HARNESSES: dict[str, dict[str, Any]] = {
     "claude-code": {"adapter": ["claude-agent-acp"], "version_arg": "CLAUDE_AGENT_ACP_VERSION"},
     "codex": {"adapter": ["codex-acp"], "version_arg": "CODEX_ACP_VERSION"},
     "opencode": {"adapter": ["opencode", "acp"], "version_arg": "OPENCODE_VERSION"},
-    "pi": {"adapter": ["agora-pi"], "version_arg": "PI_VERSION", "strip": []},
+    "pi": {"adapter": ["agora-pi"], "version_arg": "PI_VERSION"},
 }
 
 # Claude Code tools turned off when a module has builtinTools: false.
@@ -103,10 +89,6 @@ class Workspace(_Model):
 
     repo: str | None = None
     ref: str | None = None
-    # Removed from the workspace at any depth. None: the harness decides (see
-    # HARNESSES): harnesses that read project files on their own get
-    # DEFAULT_STRIP; agora-pi reads nothing it is not given, so nothing.
-    strip: list[str] | None = None
 
     @model_validator(mode="after")
     def _ref_pinned(self) -> "Workspace":
@@ -308,18 +290,12 @@ def resolve(
         limits=Limits(lim.max_runtime_minutes, lim.max_spawn_depth, lim.max_concurrent),
         spawnable_by=list(ext.spawnable_by),
         network=network or Network(),
-        workspace=_with_strip(workspace or Workspace(), runtime.harness),
+        workspace=workspace or Workspace(),
     )
     h = hashlib.sha256(json.dumps(spec.resolved_dump(), sort_keys=True).encode())
     h.update(json.dumps(mod.files, sort_keys=True).encode())
     spec.fingerprint = "sha256:" + h.hexdigest()
     return spec
-
-
-def _with_strip(ws: Workspace, harness: str) -> Workspace:
-    if ws.strip is not None:
-        return ws
-    return ws.model_copy(update={"strip": list(HARNESSES.get(harness, {}).get("strip", DEFAULT_STRIP))})
 
 
 class Catalog:

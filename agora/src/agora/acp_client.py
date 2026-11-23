@@ -73,12 +73,17 @@ class AcpClient:
         return result
 
     async def new_session(
-        self, cwd: str, mcp_servers: list[dict[str, Any]], model: str | None = None, timeout: float = 120
+        self, cwd: str, mcp_servers: list[dict[str, Any]], model: str | None = None, timeout: float = 120,
+        meta: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Open a conversation. With `model`, make sure it runs on that model:
         returns (session id, {"reported", "selected"} when the agent reports a
-        model choice, else None). See ensure_model."""
-        result = await self.peer.request("session/new", {"cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout)
+        model choice, else None). See ensure_model. `meta` goes in _meta (the
+        harness's own session options, see harness.session_meta)."""
+        params: dict[str, Any] = {"cwd": cwd, "mcpServers": mcp_servers}
+        if meta:
+            params["_meta"] = meta
+        result = await self.peer.request("session/new", params, timeout=timeout)
         sid = result["sessionId"]
         choice = await self.ensure_model(sid, result, model) if model else None
         return sid, choice
@@ -109,14 +114,16 @@ class AcpClient:
         return {"reported": current, "selected": model}
 
     async def load_session(
-        self, session_id: str, cwd: str, mcp_servers: list[dict[str, Any]], timeout: float = 300
+        self, session_id: str, cwd: str, mcp_servers: list[dict[str, Any]], timeout: float = 300,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         """Resume a conversation from the harness's own records (needs the
         agent's loadSession capability). The agent replays it as session/update
         notifications before answering."""
-        await self.peer.request(
-            "session/load", {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers}, timeout=timeout
-        )
+        params: dict[str, Any] = {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers}
+        if meta:
+            params["_meta"] = meta
+        await self.peer.request("session/load", params, timeout=timeout)
 
     async def prompt(self, session_id: str, text: str, meta: dict[str, Any] | None = None) -> tuple[str, str]:
         """Run one prompt turn. Returns (stopReason, the text the agent wrote).

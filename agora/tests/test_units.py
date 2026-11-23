@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tarfile
 import tempfile
@@ -10,10 +11,10 @@ from unittest import mock
 from helpers import MCP_SCHEMA, NS, PLUGIN_SCHEMA, plugin_json, FAKE_REFRESH_TOKEN, ROOT, fake_jwt, make_codex_login, make_module_repo, make_repo
 
 from agora.acp_client import decide_permission
-from agora.harness import harness_model_id, harness_record_dir, prepare_harness_config, resolve_definition
+from agora.harness import harness_model_id, harness_record_dir, prepare_harness_config, resolve_definition, session_meta
 from agora.logins import LoginError, load_chatgpt_login, write_access_only
 from agora.modules import ModuleCache, load_local
-from agora.spec import (BROKER_TOOLS, CLAUDE_BUILTINS, DEFAULT_STRIP, Catalog, HarnessOverride, ModuleSource,
+from agora.spec import (BROKER_TOOLS, CLAUDE_BUILTINS, Catalog, HarnessOverride, ModuleSource,
                         Network, Permissions, Workspace, load_module_dir, resolve)
 from agora.runner.docker import build_create_args, pack_bundle
 from agora.store import StateStore
@@ -84,13 +85,6 @@ class SpecTests(unittest.TestCase):
             Workspace.model_validate({"repo": "/r", "ref": "main"})
         with self.assertRaisesRegex(ValueError, "required"):
             Workspace.model_validate({"repo": "/r"})
-        self.assertIsNone(Workspace().strip)  # the harness decides
-        with tempfile.TemporaryDirectory() as t:
-            self.assertEqual(make_spec(Path(t)).workspace.strip, list(DEFAULT_STRIP))
-            pi = make_spec(Path(t), runtime={"harness": "pi", "model": "claude-haiku-5-5"})
-            self.assertEqual(pi.workspace.strip, [])  # agora-pi reads only what it is given
-            kept = make_spec(Path(t), runtime={"harness": "pi", "model": "m"}, workspace={"strip": ["x"]})
-            self.assertEqual(kept.workspace.strip, ["x"])
 
     def test_unknown_extension_fields_rejected(self):
         with tempfile.TemporaryDirectory() as t:
@@ -147,17 +141,14 @@ class SpecTests(unittest.TestCase):
 
 
 class WorkspaceTests(unittest.TestCase):
-    def test_pinned_and_stripped(self):
+    def test_pinned_and_left_as_is(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             repo, a, b = make_repo(t)
-            m = prepare_workspace(Workspace(repo=str(repo), ref=a, strip=list(DEFAULT_STRIP)), t / "ws")
+            m = prepare_workspace(Workspace(repo=str(repo), ref=a), t / "ws")
             self.assertEqual(m["head"], a)
-            files = sorted(str(f.relative_to(t / "ws")) for f in (t / "ws").rglob("*") if ".git" not in f.parts)
-            self.assertEqual(files, ["README.md", "docs", "src", "src/app.py"])
-            self.assertIn(".claude/", m["removed"])
-            self.assertIn("src/AGENTS.md", m["removed"])
-            self.assertIn("src/.codex/", m["removed"])
+            self.assertTrue((t / "ws" / "src" / "AGENTS.md").exists())  # nothing is removed
+            self.assertTrue((t / "ws" / ".claude").is_dir())
             self.assertFalse((t / "ws" / "later.txt").exists())  # commit b is not there
             self.assertTrue((t / "ws" / ".git").is_dir())
 
@@ -168,7 +159,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_no_repo_gives_empty_workspace(self):
         with tempfile.TemporaryDirectory() as t:
             m = prepare_workspace(Workspace(), Path(t) / "ws")
-            self.assertEqual(m["removed"], [])
+            self.assertIsNone(m["head"])
             self.assertEqual(list((Path(t) / "ws").iterdir()), [])
 
 
@@ -183,6 +174,15 @@ class HarnessConfigTests(unittest.TestCase):
             self.assertEqual(env["ANTHROPIC_MODEL"], "test-model-1")
             self.assertEqual((t / "agora/claude/CLAUDE.md").read_text(), "You are the echo module.\n")
             self.assertTrue((t / "agora/claude/skills/echo-skill/SKILL.md").is_file())
+
+    def test_workspace_instructions_are_not_read(self):
+        with tempfile.TemporaryDirectory() as t:
+            cc = make_spec(Path(t))  # claude-code: only agora's settings (CLAUDE_CONFIG_DIR)
+            self.assertEqual(session_meta(cc), {"claudeCode": {"options": {"settingSources": ["user"]}}})
+            self.assertIsNone(session_meta(make_spec(Path(t), runtime={"harness": "pi", "model": "m"})))
+            codex = make_spec(Path(t), runtime={"harness": "codex"})
+            prepare_harness_config(codex, Path(t) / "o", "/rt", "be brief", [])
+            self.assertIn("project_doc_max_bytes = 0", (Path(t) / "o/codex/config.toml").read_text())
 
     def test_codex_without_instructions_disables_agents_md(self):
         with tempfile.TemporaryDirectory() as t:
@@ -649,3 +649,54 @@ class IdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleImageTests(unittest.TestCase):
+    """The module's Dockerfile is built on the harness image (fake docker CLI)."""
+
+    def _fake_docker(self, t: Path) -> tuple[Path, Path]:
+        log, images = t / "docker.log", t / "images"
+        images.mkdir()
+        script = t / "docker"
+        script.write_text(f"""#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = image ]; then
+  ref=$(echo "$5" | tr '/:' '__'); [ -f {images}/$ref ] && cat {images}/$ref && exit 0; exit 1
+fi
+if [ "$1" = build ]; then
+  while [ $# -gt 0 ]; do [ "$1" = -t ] && ref=$(echo "$2" | tr '/:' '__'); shift; done
+  echo "sha256:$ref" > {images}/$ref
+fi
+""")
+        script.chmod(0o755)
+        return script, log
+
+    def test_module_dockerfile_is_built_on_the_harness_image(self):
+        from agora.runner.docker import DockerRunner
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            docker, log = self._fake_docker(t)
+            runner = DockerRunner("http://b", docker=str(docker))
+            plain = make_spec(t / "a", runtime={"harness": "pi", "model": "m"})
+            base = asyncio.run(runner.ensure_image(plain))
+            self.assertEqual(base, "sha256:agora_pi_1.0.0")
+
+            spec = make_spec(t / "b", runtime={"harness": "pi", "model": "m"})
+            (spec.module.directory / "Dockerfile").write_text("ARG BASE\nFROM ${BASE}\n")
+            image = asyncio.run(runner.ensure_image(spec))
+            self.assertTrue(image.startswith("sha256:agora_module-"), image)
+            builds = [line for line in log.read_text().splitlines() if line.startswith("build")]
+            self.assertEqual(len(builds), 2)
+            self.assertIn(f"--build-arg BASE={base}", builds[1])
+            self.assertTrue(builds[1].endswith(str(spec.module.directory)))
+            asyncio.run(runner.ensure_image(spec))  # built once
+            self.assertEqual(len([x for x in log.read_text().splitlines() if x.startswith("build")]), 2)
+
+    def test_local_runner_refuses_a_module_dockerfile(self):
+        from agora.runner.local import LocalRunner
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            spec = make_spec(t, runtime={"harness": "pi", "model": "m"})
+            (spec.module.directory / "Dockerfile").write_text("ARG BASE\nFROM ${BASE}\n")
+            with self.assertRaisesRegex(RuntimeError, "docker runner"):
+                asyncio.run(LocalRunner("http://b").start("s", spec, t / "bundle", {}, t / "err"))

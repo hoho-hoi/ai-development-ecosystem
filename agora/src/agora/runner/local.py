@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..spec import Spec
+from ..spec import MODULE_DOCKERFILE, Spec
 from . import STREAM_LIMIT, RunHandle, Runner
 
 
@@ -33,6 +33,9 @@ class LocalRunner(Runner):
 
     async def start(self, session_id: str, spec: Spec, bundle: Path, env: dict[str, str], stderr_path: Path,
                     secrets: dict[str, str] | None = None) -> RunHandle:
+        if (spec.module.directory / MODULE_DOCKERFILE).is_file():
+            # The module's environment is an image layer; this runner has none.
+            raise RuntimeError(f"module {spec.id} has a {MODULE_DOCKERFILE}: it needs the docker runner")
         workspace, agora = self.runtime_paths(bundle)
         home = bundle / "home"
         # The bundle's agora/ dir becomes $HOME/.agora, mirroring the container layout.

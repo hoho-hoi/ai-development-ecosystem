@@ -1,15 +1,14 @@
 """Host-side workspace preparation.
 
 The workspace is built on the host from a pinned commit and then copied into
-the session's container; the host's own working copy is never mounted. Files
-that harnesses read as project-level configuration are removed at every depth.
+the session's container; the host's own working copy is never mounted. Its
+files are left as they are: harnesses are configured not to read project-level
+instructions or settings on their own (see harness.py).
 """
 
 from __future__ import annotations
 
-import fnmatch
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -37,31 +36,11 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return proc.stdout.strip()
 
 
-def strip_tree(root: Path, names: list[str]) -> list[str]:
-    """Remove every file or directory under root whose name matches one of
-    `names` (shell-style patterns allowed). The .git directory is skipped."""
-    removed: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-        here = Path(dirpath)
-        if here == root and ".git" in dirnames:
-            dirnames.remove(".git")
-        for d in list(dirnames):
-            if any(fnmatch.fnmatchcase(d, pat) for pat in names):
-                shutil.rmtree(here / d)
-                dirnames.remove(d)
-                removed.append(str((here / d).relative_to(root)) + "/")
-        for f in filenames:
-            if any(fnmatch.fnmatchcase(f, pat) for pat in names):
-                (here / f).unlink()
-                removed.append(str((here / f).relative_to(root)))
-    return sorted(removed)
-
-
 def prepare_workspace(ws: Workspace, dest: Path) -> dict[str, Any]:
     """Create the session workspace in `dest` (which must not exist yet)."""
     ref = ws.ref
 
-    manifest: dict[str, Any] = {"repo": ws.repo, "ref": ref, "head": None, "removed": []}
+    manifest: dict[str, Any] = {"repo": ws.repo, "ref": ref, "head": None}
     if ws.repo:
         _git("clone", "--quiet", "--no-checkout", "--template=", ws.repo, str(dest))
         _git("checkout", "--quiet", "--detach", ref, cwd=dest)
@@ -71,5 +50,4 @@ def prepare_workspace(ws: Workspace, dest: Path) -> dict[str, Any]:
         manifest["head"] = head
     else:
         dest.mkdir(parents=True)
-    manifest["removed"] = strip_tree(dest, list(ws.strip or []))
     return manifest

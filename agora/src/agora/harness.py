@@ -81,10 +81,10 @@ def prepare_harness_config(
         if rt.permissions.mode == "deny":
             lines.append('web_search = "disabled"')
         if instructions is not None:
-            (d / "AGENTS.md").write_text(instructions, encoding="utf-8")
-        else:
-            # No instructions: make sure no AGENTS.md is read at all.
-            lines.append("project_doc_max_bytes = 0")
+            (d / "AGENTS.md").write_text(instructions, encoding="utf-8")  # $CODEX_HOME/AGENTS.md
+        # No AGENTS.md from the workspace (project docs); the module's own,
+        # above, is read from CODEX_HOME and is not a project doc.
+        lines.append("project_doc_max_bytes = 0")
         _copy_skills(skill_dirs, d / "skills")
         (d / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         env["CODEX_HOME"] = f"{runtime_dir}/codex"
@@ -173,6 +173,20 @@ def _pi_model(model: str) -> tuple[str, str]:
         provider, _, model_id = model.partition("/")
         return provider, model_id
     return "anthropic", model
+
+
+def session_meta(spec: Spec) -> dict[str, object] | None:
+    """The harness's own options for ACP session/new and session/load, so it
+    reads no project-level instructions or settings from the workspace.
+
+    Claude Code (claude-agent-acp) reads user, project and local settings by
+    default; "user" alone is CLAUDE_CONFIG_DIR, which agora writes from the
+    module. The workspace's CLAUDE.md, .claude and .mcp.json are not read.
+    Codex and OpenCode are configured through their files and environment
+    (prepare_harness_config); agora-pi reads only what it is given."""
+    if spec.runtime.harness == "claude-code":
+        return {"claudeCode": {"options": {"settingSources": ["user"]}}}
+    return None
 
 
 def harness_model_id(spec: Spec) -> str:

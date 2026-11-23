@@ -11,13 +11,15 @@ before the container is removed.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
-from ..spec import HARNESSES, Spec
+from ..spec import HARNESSES, MODULE_DOCKERFILE, Spec
 from . import STREAM_LIMIT, RunHandle, Runner
 
 # The agora project directory: images/<harness>/Dockerfile and src/ (build context).
@@ -145,6 +147,34 @@ class DockerRunner(Runner):
         self._image_lock = asyncio.Lock()
 
     async def ensure_image(self, spec: Spec) -> str:
+        """The image ID the session runs in: the harness image, plus the
+        module's own layer when the module has a Dockerfile (module_image)."""
+        base = await self.harness_image(spec)
+        if not (spec.module.directory / MODULE_DOCKERFILE).is_file():
+            return base
+        return await self.module_image(spec, base)
+
+    async def module_image(self, spec: Spec, base: str) -> str:
+        """The module's Dockerfile (next to plugin.json) built on the harness
+        image, passed as the build argument BASE (`ARG BASE` / `FROM ${BASE}`);
+        the build context is the module directory. Tagged by the base image and
+        the module's files, so it is built once per version of either."""
+        h = hashlib.sha256(base.encode())
+        h.update(json.dumps(spec.module.files, sort_keys=True).encode())
+        ref = f"agora/module-{spec.id}:{h.hexdigest()[:16]}"
+        async with self._image_lock:
+            code, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref, check=False)
+            if code == 0 and out:
+                return out
+            d = spec.module.directory
+            args = [self.docker, "build", "-q", "-f", str(d / MODULE_DOCKERFILE), "-t", ref, "--build-arg", f"BASE={base}"]
+            if self.build_network:
+                args += ["--network", self.build_network]
+            await _run(*args, str(d))
+            _, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref)
+            return out
+
+    async def harness_image(self, spec: Spec) -> str:
         """The image ID for the module's harness at its version: a prebuilt
         image the place names (harnesses.<name>.image), else agora/<harness>:
         <version>, built from images/<harness>/Dockerfile when missing."""

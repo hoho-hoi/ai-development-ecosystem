@@ -122,7 +122,10 @@ class LifecycleTests(BrokerCase):
         _, r = await self.ask(st["id"], "ENV")
         env = json.loads(r["body"])
         self.assertTrue(env["home"].startswith(str(self.b.cfg.state_dir / "bundles")), env["home"])
-        self.assertEqual(env["files"], ["README.md", "docs", "src", "src/app.py"])  # stripped, pinned to commit a
+        # pinned to commit a, nothing removed (the harness is told not to read project files)
+        self.assertIn("src/AGENTS.md", env["files"])
+        self.assertIn("src/app.py", env["files"])
+        self.assertNotIn("later.txt", env["files"])
         self.assertIn("CLAUDE.md", env["config_files"])  # the module's instructions
         self.assertIn("skills/echo-skill/SKILL.md", env["config_files"])
         self.assertNotIn("skills/evil/SKILL.md", env["config_files"])
