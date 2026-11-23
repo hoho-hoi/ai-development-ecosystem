@@ -82,8 +82,9 @@ class Runner(abc.ABC):
         """Copy the harness's own session records out before destruction."""
 
     @abc.abstractmethod
-    async def snapshot_workspace(self, handle: RunHandle, dest: Path) -> None:
-        """Copy the session's workspace as it is now into dest (for clone)."""
+    async def snapshot_workspace(self, handle: RunHandle, dest: Path, subpath: str = "") -> None:
+        """Copy the session's workspace as it is now (or one directory of it)
+        into dest: for clone, and for running a module from a workspace."""
 
     @abc.abstractmethod
     async def destroy(self, handle: RunHandle) -> None:

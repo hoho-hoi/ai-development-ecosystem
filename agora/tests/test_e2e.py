@@ -387,6 +387,31 @@ class ModuleRunTests(BrokerCase):
         code, _ = await self.b.call("spawn", {"module": "mod", "module_path": "fresh"})
         self.assertEqual(code, 400)
 
+    async def test_a_session_runs_a_module_from_its_own_workspace(self):
+        st = await self.b.tool("spawn", module="echo", wait=True)
+        manifest = json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                               "name": "drafted", "description": "a module being written",
+                               "extensions": {NS: {"runtimes": [{"harness": "claude-code", "version": "1.0.0",
+                                                                 "model": "test-model-1"}], "tools": ["send"]}}})
+        await self.ask(st["id"], f"WRITE drafted/plugin.json {manifest}")
+        await self.ask(st["id"], f"WRITE drafted/{NS}/AGENTS.md You are drafted.")
+        _, r = await self.ask(st["id"], 'BRIDGE spawn {"module_workspace_path": "drafted", "wait": true}')
+        res = json.loads(r["body"])
+        self.assertFalse(res["isError"], res)
+        child = json.loads(res["content"][0]["text"])
+        self.assertEqual((child["state"], child["module"]), ("idle", "drafted@0"), child)
+        _, r = await self.ask(child["id"], "INSTRUCTIONS")
+        self.assertEqual(json.loads(r["body"])["CLAUDE.md"], "You are drafted.")
+        spawn = self.b.events(session=child["id"], kinds=["session.spawn"])[0]["payload"]
+        self.assertEqual(spawn["module_workspace_path"], "drafted")
+        # only a session with a workspace, only inside it, and nothing else names the module
+        code, body = await self.b.call("spawn", {"module_workspace_path": "drafted"})
+        self.assertEqual(code, 400, body)
+        code, _ = await self.b.call("spawn", {"module": "echo", "module_workspace_path": "drafted"})
+        self.assertEqual(code, 400)
+        _, r = await self.ask(st["id"], 'BRIDGE spawn {"module_workspace_path": "../x"}')
+        self.assertTrue(json.loads(r["body"])["isError"])
+
     async def test_spawn_with_a_candidate_module_commit(self):
         # a candidate version of the peer module, committed after the pinned one
         mrepo = self.tmp / "module-repo"

@@ -67,6 +67,7 @@ from .jsonrpc import ConnectionClosed, RpcError
 from .logins import LoginError, load_chatgpt_login, write_access_only
 from .modules import ModuleCache
 from .gateway import HARNESS_ENV, Gateway
+from .modules import check_relative
 from .spec import BROKER_TOOLS, Catalog, Spec, Workspace
 from .telemetry import Telemetry
 from .runner import RunHandle, Runner
@@ -445,7 +446,13 @@ class SessionManager:
         place: str | None = None,
         module_ref: str | None = None,
         module_path: str | None = None,
+        module_workspace_path: str | None = None,
     ) -> dict[str, Any]:
+        if module_workspace_path and (module or module_ref or module_path or (place and place != self.place)):
+            raise BrokerError("module_workspace_path names the module by itself: no module, module_ref, "
+                              "module_path or place with it")
+        if not module and not module_workspace_path:
+            raise BrokerError("spawn needs a module (or module_workspace_path)")
         if place and place != self.place:
             # Born elsewhere; the task is then an ordinary signed message from the caller.
             args = {"module": module, "workspace": workspace, "name": name, "wait": wait,
@@ -461,8 +468,11 @@ class SessionManager:
         except Exception as e:
             raise BrokerError(f"bad workspace: {e}") from None
         try:
-            spec = await asyncio.to_thread(self.catalog.get, module, module_ref=module_ref, module_path=module_path,
-                                           workspace=ws)
+            if module_workspace_path:
+                spec = await self._workspace_module(caller, module_workspace_path, ws)
+            else:
+                spec = await asyncio.to_thread(self.catalog.get, module, module_ref=module_ref,
+                                               module_path=module_path, workspace=ws)
         except KeyError as e:
             raise NotFound(str(e)) from None
         except ValueError as e:  # SpecError, ModuleError
@@ -477,6 +487,7 @@ class SessionManager:
             task=task,
             module_ref_override=module_ref,
             module_path_override=module_path,
+            module_workspace_path=module_workspace_path,
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )
@@ -487,6 +498,18 @@ class SessionManager:
             task_message_id = (await self.send(caller, s.id, task))["message_id"]
         await self._wait_ready(s, wait, wait_timeout)
         return {**self.status(s.id), "task_message_id": task_message_id}
+
+    async def _workspace_module(self, caller: Session, path: str, ws: Workspace) -> Spec:
+        """A custom module: the module at `path` in the caller's own workspace,
+        as it is now (e.g. one the caller is writing). The caller must be a
+        session with a workspace; the copy runs like any module."""
+        if caller.kind != "managed" or caller.handle is None:
+            raise BrokerError("module_workspace_path needs a session with a workspace")
+        check_relative(path, "module_workspace_path")
+        dest = self.cfg.state_dir / "custom-modules" / _rand("w")
+        await self.runner.snapshot_workspace(caller.handle, dest, subpath=path)
+        origin = {"workspace_of": self.address(caller), "path": path}
+        return await asyncio.to_thread(self.catalog.from_directory, dest, origin, workspace=ws)
 
     def _trace_start(self, s: Session, caller: Session) -> None:
         assert s.spec is not None

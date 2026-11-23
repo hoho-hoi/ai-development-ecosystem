@@ -381,6 +381,13 @@ class Catalog:
                 raise SpecError(f"module_ref {module_ref[:12]} holds module {mod.plugin.name!r}, not {name!r}")
         return resolve(mod, src, workspace=workspace, network=self.network, harnesses=self.harnesses)
 
+    def from_directory(self, directory: Path, origin: dict[str, Any], *, workspace: Workspace | None = None) -> Spec:
+        """A module that is not registered: a copy of a directory of a session's
+        workspace (a custom module). `origin` says where it came from."""
+        mod = load_local(directory, origin)
+        return resolve(mod, ModuleSource(local=str(directory)), workspace=workspace, network=self.network,
+                       harnesses=self.harnesses)
+
 
 def load_module_dir(path: str | Path) -> ResolvedModule:
     """A module directory on its own (agora modules / tests)."""

@@ -251,6 +251,7 @@ def handle_prompt(rid, params):
         reply = json.dumps({"session": sid, "memory": state["memory"].get(sid, []), "loaded": state["loaded"]})
     elif body.startswith("WRITE "):
         _, rel, content = body.split(" ", 2)
+        (Path.cwd() / rel).parent.mkdir(parents=True, exist_ok=True)
         (Path.cwd() / rel).write_text(content)
         reply = "wrote " + rel
     elif body.startswith("READ "):
