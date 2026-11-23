@@ -235,7 +235,7 @@ my-module/
 - **skill**：`skills/` の直下のディレクトリだけを読みます。`SKILL.md` の `name` はディレクトリ名と同じにします。
 - **MCP サーバー**（`mcp.json`）：`stdio` と `http`（`streamable-http`）に対応します。モジュール全体をセッションの中に写し、`${PLUGIN_ROOT}` と `./` で始まる `command` をその場所に置き換えて、ACP の `session/new` で渡します。`command` は1つの実行ファイル（コマンドラインは不可）、`cwd` は使えません（ACP にない）、リモートは https のみ、名前 `agora` は場所の MCP サーバー用に予約しています。
 - **モデルの確認**：ハーネスが ACP でモデルの選択肢を示す場合、起動時に現在のモデルを確かめ、違えばモジュールのモデルに切り替えます。選択肢にないときは、別のモデルで動かさずに起動を失敗させます（`session.model` に記録）。
-- **作業場所**：作業するリポジトリは依頼ごとに変わるので、`spawn` の `workspace`（`{repo, ref}`）で渡します。CLAUDE.md・AGENTS.md・`.claude`・`.mcp.json`・`.codex`・`.gemini`・`.opencode`・`.pi`・`.agents` などは全階層から除去します。
+- **作業場所**：作業するリポジトリは依頼ごとに変わるので、`spawn` の `workspace`（`{repo, ref}`）で渡します。ハーネスが自分で読みに行くファイル（CLAUDE.md・AGENTS.md・`.claude`・`.mcp.json`・`.codex`・`.gemini`・`.opencode`・`.pi`・`.agents` など）は全階層から除去します。pi は agora-pi が渡したものしか読まないので、何も除去しません（モノレポの `AGENTS.md` のように、それ自体が仕事の対象になるため）。`workspace.strip` で明示もできます。
 - サブエージェントは持ちません。別のエージェントが必要なら、agora で別のセッションを起こして話します。
 - モジュールのディレクトリの外のファイルはエージェントに渡りません。リポジトリのどこに何を置くかは利用者の自由です。
 - 以前の `module.json` は読みません（見つかると移行を促すエラーになります）。

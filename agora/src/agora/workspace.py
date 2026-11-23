@@ -71,5 +71,5 @@ def prepare_workspace(ws: Workspace, dest: Path) -> dict[str, Any]:
         manifest["head"] = head
     else:
         dest.mkdir(parents=True)
-    manifest["removed"] = strip_tree(dest, list(ws.strip))
+    manifest["removed"] = strip_tree(dest, list(ws.strip or []))
     return manifest

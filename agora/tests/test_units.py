@@ -84,7 +84,13 @@ class SpecTests(unittest.TestCase):
             Workspace.model_validate({"repo": "/r", "ref": "main"})
         with self.assertRaisesRegex(ValueError, "required"):
             Workspace.model_validate({"repo": "/r"})
-        self.assertEqual(Workspace().strip, list(DEFAULT_STRIP))
+        self.assertIsNone(Workspace().strip)  # the harness decides
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(make_spec(Path(t)).workspace.strip, list(DEFAULT_STRIP))
+            pi = make_spec(Path(t), runtime={"harness": "pi", "model": "claude-haiku-5-5"})
+            self.assertEqual(pi.workspace.strip, [])  # agora-pi reads only what it is given
+            kept = make_spec(Path(t), runtime={"harness": "pi", "model": "m"}, workspace={"strip": ["x"]})
+            self.assertEqual(kept.workspace.strip, ["x"])
 
     def test_unknown_extension_fields_rejected(self):
         with tempfile.TemporaryDirectory() as t:
@@ -145,7 +151,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             repo, a, b = make_repo(t)
-            m = prepare_workspace(Workspace(repo=str(repo), ref=a), t / "ws")
+            m = prepare_workspace(Workspace(repo=str(repo), ref=a, strip=list(DEFAULT_STRIP)), t / "ws")
             self.assertEqual(m["head"], a)
             files = sorted(str(f.relative_to(t / "ws")) for f in (t / "ws").rglob("*") if ".git" not in f.parts)
             self.assertEqual(files, ["README.md", "docs", "src", "src/app.py"])
