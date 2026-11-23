@@ -414,6 +414,13 @@ class ModuleRunTests(BrokerCase):
         self.assertEqual(code, 400)
         _, r = await self.ask(st["id"], 'BRIDGE spawn {"module_workspace_path": "../x"}')
         self.assertTrue(json.loads(r["body"])["isError"])
+        # an absolute path as the session sees it, inside its workspace
+        root = self.b.broker.manager.resolve(st["id"]).handle.workspace_path
+        _, r = await self.ask(st["id"], "BRIDGE spawn " + json.dumps({"module_workspace_path": f"{root}/drafted", "wait": True}))
+        res = json.loads(r["body"])
+        self.assertFalse(res["isError"], res)
+        _, r = await self.ask(st["id"], 'BRIDGE spawn {"module_workspace_path": "/etc"}')
+        self.assertTrue(json.loads(r["body"])["isError"])
 
     async def test_spawn_with_a_candidate_module_commit(self):
         # a candidate version of the peer module, committed after the pinned one

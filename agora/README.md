@@ -227,7 +227,7 @@ my-module/
 | `tools` | 渡す agora のツール（`[send]` など）。`true` はすべて（既定）、`false` はなし。場所もセッションのトークンに同じ制限をかける |
 | `builtinTools` | ハーネス組み込みのツール（シェル、ファイル操作、Web など）を使うか（既定 `true`）。権限はいつもフルで、確認待ちで止まらない。やらせたくないことは、ツールや MCP を渡さないことで防ぐ。`false` なら組み込みのツールを止め（Claude Code は拒否リスト、Codex は読み取り専用、権限要求は拒否）、agora のツールと MCP だけで動く |
 | `sessionMode` | `persistent`（既定。1つの会話を続ける）か `per_message`（メッセージごとに新しい会話。コンテナは同じ） |
-| `limits` | `maxRuntimeMinutes`、`maxSpawnDepth`（さらに何段下まで spawn できるか。0 なら不可。親の残りと場所の `max_spawn_depth` も超えない）、`maxConcurrent` |
+| `limits` | `maxRuntimeMinutes`、`maxSpawnDepth`（さらに何段下まで spawn できるか。0 なら不可。親の残りと場所の `max_spawn_depth` も超えない）、`maxConcurrent`（同じモジュールの同時のセッション数。既定 20。場所全体の上限は `max_sessions`、既定 20） |
 | `spawnableBy` | 起動を許す相手。`external`（操作者・外部セッション）、`*`（どのセッションでも）、モジュール名。既定は両方 |
 | `instructions` | 指示ファイル（名前空間ディレクトリからの相対パス。既定 `AGENTS.md`） |
 
@@ -334,7 +334,7 @@ http_headers = { Authorization = "Bearer <broker.key の中身>" }
 | --- | --- |
 | `send` | 宛先（`id@場所`、または同じ場所の id か名前）の受信箱に入れて、すぐ `message_id` を返す。`reply_to` があれば宛先は省ける |
 | `receive` | 自分宛ての未読を取り出す。`from`・`reply_to` で絞り込み、`wait` 秒（最大 600）まで待てる。`from` の相手が黙れば待たずに返る |
-| `spawn` | モジュール（`module` に id）のセッションを起動（`place` で別の場所に）。`task` を渡すと最初のメッセージになり、結果の `task_message_id` で返事を `receive` できる。`workspace`（`{repo, ref}`）で作業するリポジトリを渡す。`module_ref` にコミット SHA を渡すと、そのモジュールを別の版（改善の候補など）にして起動する（リポジトリから登録したモジュールのみ。`session.spawn` に記録）。`module_path` を渡すと、同じリポジトリの別のパスにあるモジュール（作成中でまだ登録していないものなど）を起動する（`module_ref` と組み合わせられる）。`module_workspace_path` を渡すと、呼んだセッション自身の作業場所にあるモジュールを、その時点の中身で起動する（カスタムモジュール。作りかけのモジュールを、push せずに確かめるため。`module` などとは一緒に使わない） |
+| `spawn` | モジュール（`module` に id）のセッションを起動（`place` で別の場所に）。`task` を渡すと最初のメッセージになり、結果の `task_message_id` で返事を `receive` できる。`workspace`（`{repo, ref}`）で作業するリポジトリを渡す。`module_ref` にコミット SHA を渡すと、そのモジュールを別の版（改善の候補など）にして起動する（リポジトリから登録したモジュールのみ。`session.spawn` に記録）。`module_path` を渡すと、同じリポジトリの別のパスにあるモジュール（作成中でまだ登録していないものなど）を起動する（`module_ref` と組み合わせられる）。`module_workspace_path` を渡すと、呼んだセッション自身の作業場所にあるモジュールを、その時点の中身で起動する（作業場所からの相対パス、またはその中の絶対パス。カスタムモジュール。作りかけのモジュールを、push せずに確かめるため。`module` などとは一緒に使わない） |
 | `clone` | セッション（`"self"` なら自分）の複製を起動。ワークスペースと会話をその時点のまま引き継ぐ |
 | `list_modules` | 登録されたモジュールの一覧（id、説明、版、起動条件）と、ほかに知っている場所。`place` で別の場所に聞く |
 | `list_sessions` / `status` | 一覧と状態（未読の数、直近のターンで書いた文章、経過時間、使用量）。`place`・`id@場所` で別の場所 |

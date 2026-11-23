@@ -48,7 +48,7 @@ import shutil
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .acp_client import AcpClient
@@ -506,6 +506,11 @@ class SessionManager:
         session with a workspace; the copy runs like any module."""
         if caller.kind != "managed" or caller.handle is None:
             raise BrokerError("module_workspace_path needs a session with a workspace")
+        if path.startswith("/"):  # as the caller sees it, e.g. /workspace/x
+            root = PurePosixPath(caller.handle.workspace_path)
+            if not PurePosixPath(path).is_relative_to(root):
+                raise BrokerError(f"module_workspace_path must be inside your workspace ({root})")
+            path = str(PurePosixPath(path).relative_to(root))
         check_relative(path, "module_workspace_path")
         dest = self.cfg.state_dir / "custom-modules" / _rand("w")
         await self.runner.snapshot_workspace(caller.handle, dest, subpath=path)

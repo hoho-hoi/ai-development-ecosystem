@@ -110,7 +110,7 @@ class BrokerConfig(BaseModel):
     container_broker_url: str | None = None
     docker: DockerSettings = Field(default_factory=DockerSettings)
     # Global caps.
-    max_sessions: int = 8
+    max_sessions: int = 20
     max_spawn_depth: int = 2
     keep_bundles: bool = False
     # The broker's own Codex login (a CODEX_HOME holding auth.json), used by
