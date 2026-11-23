@@ -687,7 +687,7 @@ fi
             self.assertTrue(image.startswith("sha256:agora_module-"), image)
             builds = [line for line in log.read_text().splitlines() if line.startswith("build")]
             self.assertEqual(len(builds), 2)
-            self.assertIn(f"--build-arg BASE={base}", builds[1])
+            self.assertIn("--build-arg BASE=agora/pi:1.0.0", builds[1])  # a name: FROM takes no image ID
             self.assertTrue(builds[1].endswith(str(spec.module.directory)))
             asyncio.run(runner.ensure_image(spec))  # built once
             self.assertEqual(len([x for x in log.read_text().splitlines() if x.startswith("build")]), 2)

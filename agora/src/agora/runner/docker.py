@@ -162,24 +162,33 @@ class DockerRunner(Runner):
         h = hashlib.sha256(base.encode())
         h.update(json.dumps(spec.module.files, sort_keys=True).encode())
         ref = f"agora/module-{spec.id}:{h.hexdigest()[:16]}"
+        # FROM needs a name, not an image ID; the ID (above) keys the tag.
+        base_ref = self._harness_ref(spec)
         async with self._image_lock:
             code, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref, check=False)
             if code == 0 and out:
                 return out
             d = spec.module.directory
-            args = [self.docker, "build", "-q", "-f", str(d / MODULE_DOCKERFILE), "-t", ref, "--build-arg", f"BASE={base}"]
+            args = [self.docker, "build", "-q", "-f", str(d / MODULE_DOCKERFILE), "-t", ref, "--build-arg", f"BASE={base_ref}"]
+            for k, v in sorted(self.build_args.items()):  # the place's (e.g. a proxy)
+                if k != "BASE":
+                    args += ["--build-arg", f"{k}={v}"]
             if self.build_network:
                 args += ["--network", self.build_network]
             await _run(*args, str(d))
             _, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref)
             return out
 
+    @staticmethod
+    def _harness_ref(spec: Spec) -> str:
+        return spec.runtime.image or f"agora/{spec.runtime.harness}:{spec.runtime.version}"
+
     async def harness_image(self, spec: Spec) -> str:
         """The image ID for the module's harness at its version: a prebuilt
         image the place names (harnesses.<name>.image), else agora/<harness>:
         <version>, built from images/<harness>/Dockerfile when missing."""
         rt = spec.runtime
-        ref = rt.image or f"agora/{rt.harness}:{rt.version}"
+        ref = self._harness_ref(spec)
         async with self._image_lock:
             code, out, _ = await _run(self.docker, "image", "inspect", "--format", "{{.Id}}", ref, check=False)
             if code == 0 and out:
