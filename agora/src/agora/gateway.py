@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -33,15 +34,16 @@ class Gateway:
         self.session_url = session_url.rstrip("/")
         self.master_key_env = master_key_env
 
-    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
+        """POST `body`, or GET when it is None."""
         key = os.environ.get(self.master_key_env)
         if not key:
             raise GatewayError(f"environment variable {self.master_key_env} (the gateway's master key) is not set")
         req = urllib.request.Request(
             self.url + path,
-            data=json.dumps(body).encode(),
+            data=None if body is None else json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-            method="POST",
+            method="GET" if body is None else "POST",
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
@@ -56,6 +58,12 @@ class Gateway:
         if not key:
             raise GatewayError("gateway returned no key")
         return str(key)
+
+    def spend(self, key: str) -> float:
+        """What the key has cost so far (USD), as the gateway recorded it. The
+        gateway writes spend in batches, so the last few seconds may be missing."""
+        res = self._post("/key/info?" + urllib.parse.urlencode({"key": key}), None)
+        return float((res.get("info") or {}).get("spend") or 0.0)
 
     def revoke(self, key: str) -> None:
         self._post("/key/delete", {"keys": [key]})

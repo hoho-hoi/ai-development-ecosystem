@@ -135,7 +135,7 @@ class Session:
     finalized: asyncio.Event = field(default_factory=asyncio.Event)
     last_text: str | None = None  # what the agent wrote in its last turn (delivered to no one)
     turns: int = 0
-    usage: dict[str, Any] | None = None
+    cost_usd: float | None = None  # from the LLM gateway (refresh_cost)
     tools: frozenset[str] | None = None  # tools this person may call; None = all
     # set whenever a message is put in this mailbox, and whenever someone this
     # person is waiting on (receive from=) goes quiet
@@ -641,11 +641,6 @@ class SessionManager:
             self.store.record("session.process", session_id=s.id, **s.handle.info)
             s.tasks.append(asyncio.create_task(self._watch_process(s)))
 
-            def on_update(params: dict[str, Any]) -> None:
-                upd = params.get("update") or {}
-                if upd.get("sessionUpdate") == "usage_update":
-                    s.usage = upd
-
             def on_permission(params: dict[str, Any], outcome: dict[str, Any]) -> None:
                 self.store.record("acp.permission", session_id=s.id, request=params, outcome=outcome)
 
@@ -653,7 +648,6 @@ class SessionManager:
                 s.handle.reader,
                 s.handle.writer,
                 permissions=spec.runtime.permissions,
-                on_update=on_update,
                 on_permission=on_permission,
             )
             await s.acp.initialize()
@@ -1068,13 +1062,23 @@ class SessionManager:
             out.append(self.summary(s))
         return out
 
+    async def refresh_cost(self, s: Session) -> None:
+        """Read the session's cost from the LLM gateway (its virtual key)."""
+        if not (s.llm_key and self.gateway):
+            return
+        try:
+            s.cost_usd = await asyncio.to_thread(self.gateway.spend, s.llm_key)
+        except Exception as e:  # keep the last known value
+            self.store.record("session.error", session_id=s.id, stage="cost", error=repr(e))
+
     def status(self, ref: str) -> dict[str, Any]:
         s = self.resolve(ref, live_only=False)
         info = self.summary(s)
         info.update(
             {
                 "last_text": s.last_text,
-                "usage": s.usage,
+                # USD, as the LLM gateway recorded it (None: no gateway at this place)
+                "cost_usd": s.cost_usd,
                 "unread": len(self.store.unread(s.id)),
                 "acp_session_id": s.acp_session_id,
                 "fingerprint": s.spec.fingerprint if s.spec else None,
@@ -1138,6 +1142,7 @@ class SessionManager:
             if s.acp:
                 await s.acp.close()
             if s.llm_key and self.gateway:
+                await self.refresh_cost(s)  # the key's spend is gone once it is deleted
                 key, s.llm_key = s.llm_key, None
                 await asyncio.to_thread(self.gateway.revoke, key)
         except Exception as e:

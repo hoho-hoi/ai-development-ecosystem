@@ -599,7 +599,7 @@ if __name__ == "__main__":
 
 
 class FakeGateway:
-    """Stands in for LiteLLM's /key/generate and /key/delete."""
+    """Stands in for LiteLLM's /key/generate, /key/info and /key/delete."""
 
     def __init__(self):
         import http.server
@@ -614,6 +614,15 @@ class FakeGateway:
                 outer.requests.append((self.path, body, self.headers.get("Authorization", "")))
                 out = {"key": "sk-virtual-" + body.get("key_alias", "x")} if self.path == "/key/generate" else {}
                 data = json.dumps(out).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                outer.requests.append((self.path, {}, self.headers.get("Authorization", "")))
+                data = json.dumps({"key": "x", "info": {"spend": 0.0123}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -676,9 +685,13 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         # the key never reaches the history
         hist = json.dumps(self.b.events(session=st["id"]))
         self.assertNotIn(f"sk-virtual-agora-{st['id']}", hist)
+        # the session's cost comes from the gateway, and is kept after the key is gone
+        self.assertEqual((await self.b.tool("status", session=st["id"]))["cost_usd"], 0.0123)
+        self.assertIn(f"/key/info?key=sk-virtual-agora-{st['id']}", [p for p, _, _ in self.gw.requests])
         await self.b.tool("terminate", session=st["id"])
         self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
                       [(p, b) for p, b, _ in self.gw.requests])
+        self.assertEqual((await self.b.tool("status", session=st["id"]))["cost_usd"], 0.0123)
 
     async def test_each_turn_is_a_trace_of_its_session(self):
         st = await self.b.tool("spawn", module="echo", wait=True)

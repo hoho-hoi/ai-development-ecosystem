@@ -102,7 +102,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "status",
-        "description": "State, last text, elapsed time and usage of one session (id@place, or an id or name here).",
+        "description": "State, last text, elapsed time and cost (USD, as the LLM gateway recorded it) of one session (id@place, or an id or name here).",
         "inputSchema": {"type": "object", "properties": {"session": S}, "required": ["session"]},
     },
     {

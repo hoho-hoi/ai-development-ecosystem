@@ -232,7 +232,9 @@ class Broker:
                 ),
             }
         if tool == "status":
-            return m.status(caller.id if args["session"] == "self" else args["session"])
+            target = m.resolve(caller.id if args["session"] == "self" else args["session"], live_only=False)
+            await m.refresh_cost(target)
+            return m.status(target.id)
         if tool == "terminate":
             target = caller.id if args["session"] == "self" else args["session"]
             return await m.terminate(caller, target, args.get("reason"))
