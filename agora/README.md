@@ -227,7 +227,7 @@ my-module/
 | `tools` | 渡す agora のツール（`[send]` など）。`true` はすべて（既定）、`false` はなし。場所もセッションのトークンに同じ制限をかける |
 | `builtinTools` | ハーネス組み込みのツール（シェル、ファイル操作、Web など）を使うか（既定 `true`）。権限はいつもフルで、確認待ちで止まらない。やらせたくないことは、ツールや MCP を渡さないことで防ぐ。`false` なら組み込みのツールを止め（Claude Code は拒否リスト、Codex は読み取り専用、権限要求は拒否）、agora のツールと MCP だけで動く |
 | `sessionMode` | `persistent`（既定。1つの会話を続ける）か `per_message`（メッセージごとに新しい会話。コンテナは同じ） |
-| `limits` | `maxRuntimeMinutes`、`maxSpawnDepth`（さらに何段下まで spawn できるか。0 なら不可。親の残りと場所の `max_spawn_depth` も超えない）、`maxConcurrent`（同じモジュールの同時のセッション数。既定 20。場所全体の上限は `max_sessions`、既定 20） |
+| `limits` | `maxRuntimeMinutes`、`maxSpawnDepth`（さらに何段下まで spawn できるか。0 なら不可。既定 10。親の残りと場所の `max_spawn_depth`（既定 10）も超えない）、`maxConcurrent`（同じモジュールの同時のセッション数。既定 20。場所全体の上限は `max_sessions`、既定 20） |
 | `spawnableBy` | 起動を許す相手。`external`（操作者・外部セッション）、`*`（どのセッションでも）、モジュール名。既定は両方 |
 | `instructions` | 指示ファイル（名前空間ディレクトリからの相対パス。既定 `AGENTS.md`） |
 

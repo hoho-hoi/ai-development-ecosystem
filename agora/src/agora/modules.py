@@ -86,7 +86,7 @@ class RuntimeOption(_Closed):
 
 class ModuleLimits(_Closed):
     max_runtime_minutes: int = Field(default=60, alias="maxRuntimeMinutes", ge=1)
-    max_spawn_depth: int = Field(default=1, alias="maxSpawnDepth", ge=0)
+    max_spawn_depth: int = Field(default=10, alias="maxSpawnDepth", ge=0)
     max_concurrent: int = Field(default=20, alias="maxConcurrent", ge=1)
 
 
