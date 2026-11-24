@@ -422,6 +422,33 @@ class ModuleRunTests(BrokerCase):
         _, r = await self.ask(st["id"], 'BRIDGE spawn {"module_workspace_path": "/etc"}')
         self.assertTrue(json.loads(r["body"])["isError"])
 
+    async def test_a_session_gives_another_a_secret_file(self):
+        giver = await self.b.tool("spawn", module="echo", wait=True)
+        taker = await self.b.tool("spawn", module="echo", wait=True)
+        value = "ghs_issuedtoken0123456789"
+        await self.ask(giver["id"], f"WRITE tok.txt {value}")
+        _, r = await self.ask(giver["id"], "BRIDGE give_secret " + json.dumps(
+            {"to": taker["id"], "name": "GITHUB_TOKEN", "path": "tok.txt"}))
+        res = json.loads(r["body"])
+        self.assertFalse(res["isError"], res)
+        out = json.loads(res["content"][0]["text"])
+        f = Path(out["path"])
+        self.assertEqual(f.read_text(), value)
+        self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(f.parent, Path(self.b.broker.manager.resolve(taker["id"]).handle.agora_path) / "secrets")
+        # who gave what to whom is recorded; the value is not
+        given = self.b.events(session=giver["id"], kinds=["secret.give"])[0]["payload"]
+        self.assertEqual((given["name"], given["to"]), ("GITHUB_TOKEN", f"{taker['id']}@pc1"))
+        await self.b.tool("send", to=giver["id"], body=f"echo: {value}")  # even when someone writes it out
+        events = self.b.events()
+        after = events[[e["kind"] for e in events].index("secret.give"):]  # (the test itself wrote it out before)
+        self.assertNotIn(value, json.dumps(after))
+        self.assertIn("[REDACTED:GITHUB_TOKEN]", json.dumps(after))
+        # a name is a file name, nothing more
+        _, r = await self.ask(giver["id"], "BRIDGE give_secret " + json.dumps(
+            {"to": taker["id"], "name": "../x", "path": "tok.txt"}))
+        self.assertTrue(json.loads(r["body"])["isError"])
+
     async def test_spawn_with_a_candidate_module_commit(self):
         # a candidate version of the peer module, committed after the pinned one
         mrepo = self.tmp / "module-repo"
@@ -551,7 +578,7 @@ class McpEndpointTests(BrokerCase):
                 tools = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
                     tools, ["send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate",
-                            "history"]
+                            "history", "give_secret"]
                 )
                 res = await client.call_tool("list_modules", {})
                 mods = json.loads(res.content[0].text)["modules"]

@@ -295,6 +295,24 @@ class DockerRunner(Runner):
         src = f"{CONTAINER_WORKSPACE}/{subpath}" if subpath else CONTAINER_WORKSPACE
         await _run(self.docker, "cp", f"{handle.info['container']}:{src}", str(dest))
 
+    async def _exec(self, handle: RunHandle, argv: list[str], data: bytes | None = None) -> bytes:
+        proc = await asyncio.create_subprocess_exec(
+            self.docker, "exec", "-i", "-u", "agent", "-w", CONTAINER_WORKSPACE, handle.info["container"], *argv,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await proc.communicate(data)
+        if proc.returncode != 0:
+            raise DockerError(f"{argv[0]} in the session failed: {err.decode(errors='replace').strip()}")
+        return out
+
+    async def read_file(self, handle: RunHandle, path: str) -> bytes:
+        return await self._exec(handle, ["cat", "--", path])
+
+    async def write_secret(self, handle: RunHandle, name: str, data: bytes) -> str:
+        d = f"{CONTAINER_HB}/secrets"
+        await self._exec(handle, ["sh", "-c", 'umask 077 && mkdir -p "$1" && cat > "$1/$2"', "sh", d, name], data)
+        return f"{d}/{name}"
+
     async def destroy(self, handle: RunHandle) -> None:
         await _run(self.docker, "rm", "-f", handle.info["container"], check=False)
         if not self.keep_bundles:

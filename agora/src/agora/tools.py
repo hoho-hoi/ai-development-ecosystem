@@ -120,6 +120,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "give_secret",
+        "description": "Give another session a secret (a key, a token) without putting it in a message: agora copies the file at path in your body (relative to your workspace, or absolute) into theirs as ~/.agora/secrets/<name>, readable only by them, and keeps the value out of every record. Returns the path they read it from; tell them in a message. The record shows who gave which name to whom.",
+        "inputSchema": {"type": "object", "properties": {"to": S, "name": S, "path": S}, "required": ["to", "name", "path"]},
+    },
 ]
 # MCP tool annotations. Harnesses use them to decide whether a call needs the
 # user's approval (Codex asks for every tool without them), so they must say
@@ -136,6 +141,7 @@ ANNOTATIONS: dict[str, dict[str, Any]] = {
     "status": {"title": "Session status", "readOnlyHint": True, **_CLOSED},
     "terminate": {"title": "Stop a session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, **_CLOSED},
     "history": {"title": "Execution history", "readOnlyHint": True, **_CLOSED},
+    "give_secret": {"title": "Give a secret file", "readOnlyHint": False, "destructiveHint": False, **_CLOSED},
 }
 for _tool in TOOL_SCHEMAS:
     _tool["annotations"] = ANNOTATIONS[_tool["name"]]

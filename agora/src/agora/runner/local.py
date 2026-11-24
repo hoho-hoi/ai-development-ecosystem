@@ -81,6 +81,17 @@ class LocalRunner(Runner):
     async def snapshot_workspace(self, handle: RunHandle, dest: Path, subpath: str = "") -> None:
         shutil.copytree(Path(handle.workspace_path) / subpath, dest, symlinks=True)
 
+    async def read_file(self, handle: RunHandle, path: str) -> bytes:
+        return (Path(handle.workspace_path) / path).read_bytes()  # an absolute path stays as it is
+
+    async def write_secret(self, handle: RunHandle, name: str, data: bytes) -> str:
+        d = Path(handle.agora_path) / "secrets"
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        f = d / name
+        f.touch(mode=0o600)
+        f.write_bytes(data)
+        return str(f)
+
     async def destroy(self, handle: RunHandle) -> None:
         if not self.keep_bundles:
             shutil.rmtree(handle.info["bundle"], ignore_errors=True)

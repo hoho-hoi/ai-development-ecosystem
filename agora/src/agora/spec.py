@@ -41,7 +41,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # SHA-1 or SHA-256 obj
 ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 # Tools the broker offers to sessions, in the order the bridge lists them.
-BROKER_TOOLS = ("send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history")
+BROKER_TOOLS = ("send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history",
+                "give_secret")
 
 # How agora starts each harness: the ACP command inside the session, and the
 # build argument that pins the harness version in images/<harness>/Dockerfile.

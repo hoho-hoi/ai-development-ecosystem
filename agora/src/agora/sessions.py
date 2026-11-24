@@ -81,6 +81,7 @@ LIVE = {"preparing", "starting", "idle", "busy", "active"}
 # Seconds to wait before handing a message to another place again.
 REMOTE_RETRY_DELAYS = (0.5, 2.0)
 SESSION_ID_RE = re.compile(r"^(s-[0-9a-f]{16}|operator)$")
+SECRET_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class BrokerError(Exception):
@@ -1092,6 +1093,29 @@ class SessionManager:
         return info
 
     # --- death ------------------------------------------------------------
+    async def give_secret(self, caller: Session, to: str, name: str, path: str) -> dict[str, Any]:
+        """Copy a file from the caller's body into another session's body as
+        <agora path>/secrets/<name> (e.g. a key the caller issued). The value
+        never passes through a message: agora reads the file itself and redacts
+        the value from every event; the record keeps who gave what to whom."""
+        if caller.kind != "managed" or caller.handle is None:
+            raise BrokerError("give_secret needs a session with a body (the file is read from it)")
+        if not SECRET_NAME_RE.match(name):
+            raise BrokerError("name: letters, digits, '.', '_' and '-' only, at most 64")
+        target = self.resolve(to)
+        if target.kind != "managed" or target.handle is None:
+            raise BrokerError(f"{target.name} has no body to give a secret to")
+        data = await self.runner.read_file(caller.handle, path)
+        if not data or len(data) > 64 * 1024:
+            raise BrokerError("the file must be non-empty and at most 64 KiB")
+        text = data.decode(errors="replace")
+        self.store.add_secret(name, text)
+        self.store.add_secret(name, text.strip())
+        dest = await self.runner.write_secret(target.handle, name, data)
+        self.store.record("secret.give", session_id=caller.id, to=self.address(target), name=name, path=dest,
+                          bytes=len(data))
+        return {"to": self.address(target), "name": name, "path": dest}
+
     async def terminate(self, caller: Session, ref: str, reason: str | None = None) -> dict[str, Any]:
         s = self.resolve(ref, live_only=False)
         if caller.kind != "operator" and self.address(caller) not in (self.address(s), s.parent_id):

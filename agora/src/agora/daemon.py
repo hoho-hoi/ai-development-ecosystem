@@ -61,6 +61,7 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "status": ({"session"}, {"session"}),
     "terminate": ({"session", "reason"}, {"session"}),
     "history": ({"sql"}, set()),
+    "give_secret": ({"to", "name", "path"}, {"to", "name", "path"}),
 }
 # Tools another place may call on behalf of one of its residents. send arrives
 # as /federation/deliver, and a mailbox is read only where it is kept.
@@ -238,6 +239,8 @@ class Broker:
         if tool == "terminate":
             target = caller.id if args["session"] == "self" else args["session"]
             return await m.terminate(caller, target, args.get("reason"))
+        if tool == "give_secret":
+            return await m.give_secret(caller, args["to"], args["name"], args["path"])
         if tool == "history":
             # Read-only SQL over this place's trace store; anyone's history is open.
             if self.history is None:

@@ -87,6 +87,16 @@ class Runner(abc.ABC):
         into dest: for clone, and for running a module from a workspace."""
 
     @abc.abstractmethod
+    async def read_file(self, handle: RunHandle, path: str) -> bytes:
+        """A file in the session's body (absolute as the agent sees it, or
+        relative to its workspace), read as the agent user."""
+
+    @abc.abstractmethod
+    async def write_secret(self, handle: RunHandle, name: str, data: bytes) -> str:
+        """Put `data` in the session's body as <agora path>/secrets/<name>,
+        readable by the agent user only. Returns the path as the agent sees it."""
+
+    @abc.abstractmethod
     async def destroy(self, handle: RunHandle) -> None:
         ...
 

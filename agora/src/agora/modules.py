@@ -54,7 +54,8 @@ class _Closed(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
-BROKER_TOOL_NAMES = ("send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history")
+BROKER_TOOL_NAMES = ("send", "receive", "list_modules", "spawn", "clone", "list_sessions", "status", "terminate", "history",
+                     "give_secret")
 
 
 class RuntimeOption(_Closed):
