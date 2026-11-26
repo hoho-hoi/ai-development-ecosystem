@@ -405,5 +405,57 @@ class OpenHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [("describeSqlSchema", {}, "phx-1"), ("executeSql", {"sql": "select 1"}, "phx-1")])
 
 
+class HistoryReconnectTests(unittest.TestCase):
+    def test_an_expired_trace_store_session_is_replaced(self):
+        from agora.history import PhoenixHistory
+
+        live = set()
+        made = []
+
+        class Phoenix(http.server.BaseHTTPRequestHandler):
+            """Like Phoenix's /mcp: any request carrying an unknown session id gets 404."""
+
+            def do_POST(self):
+                frame = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                sid = self.headers.get("Mcp-Session-Id")
+                if sid is not None and sid not in live:
+                    data = b'{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Session not found"}}'
+                    self.send_response(404)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if "id" not in frame:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                if frame["method"] == "initialize":
+                    sid = f"phx-{len(made) + 1}"
+                    made.append(sid)
+                    live.add(sid)
+                    result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "phoenix"}}
+                else:
+                    result = {"content": [{"type": "text", "text": json.dumps({"rows": [[1]]})}], "isError": False}
+                data = json.dumps({"jsonrpc": "2.0", "id": frame["id"], "result": result}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", sid)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Phoenix)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        h = PhoenixHistory(f"http://127.0.0.1:{server.server_address[1]}/mcp")
+        self.assertEqual(h.query("select 1"), {"rows": [[1]]})
+        live.clear()  # the trace store forgot the session (expired or restarted)
+        self.assertEqual(h.query("select 1"), {"rows": [[1]]})
+        self.assertEqual(made, ["phx-1", "phx-2"])
+
+
 if __name__ == "__main__":
     unittest.main()

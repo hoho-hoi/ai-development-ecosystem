@@ -60,6 +60,7 @@ class PhoenixHistory:
         return reply, reply_headers
 
     def _connect(self) -> None:
+        self._session = None  # an expired session id must not go with the handshake
         self._id += 1
         reply, headers = self._post({"jsonrpc": "2.0", "id": self._id, "method": "initialize", "params": {
             "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "agora", "version": "0"}}})
