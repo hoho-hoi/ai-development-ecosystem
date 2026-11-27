@@ -650,8 +650,7 @@ class SessionManager:
                 url_var, key_var = HARNESS_ENV[spec.runtime.harness]
                 meta = {"agora_session": self.address(s), "module": spec.id, "module_version": spec.version,
                         "fingerprint": spec.fingerprint, "place": self.place}
-                cap = self._key_cap(s)
-                s.llm_key = await asyncio.to_thread(self.gateway.mint, s.id, meta, cap)
+                s.llm_key = await asyncio.to_thread(self.gateway.mint, s.id, meta)
                 self.store.add_secret("llm_key", s.llm_key)
                 env[url_var] = self.gateway.session_url
                 extra_secrets[key_var] = s.llm_key
@@ -1102,27 +1101,6 @@ class SessionManager:
 
     def _subtree_cost(self, s: Session) -> float:
         return sum(x.cost_usd or 0.0 for x in self._subtree(s))
-
-    def _budgeted_line(self, s: Session) -> list[Session]:
-        """s and its ancestors here that have a budget."""
-        out, x = [], s
-        while x is not None:
-            if x.budget_usd is not None:
-                out.append(x)
-            if not x.parent_id:
-                break
-            ref, place = split_address(x.parent_id)
-            x = self.sessions.get(ref) if place in (None, self.place) else None
-            if x is not None and x.kind != "managed":
-                break
-        return out
-
-    def _key_cap(self, s: Session) -> float | None:
-        """The most a new key may spend: what is left of the tightest budget
-        above (or of) s. The gateway refuses calls past it, so one session
-        cannot overrun between two budget checks."""
-        left = [b.budget_usd - self._subtree_cost(b) for b in self._budgeted_line(s)]  # type: ignore[operator]
-        return max(0.0, min(left)) if left else None
 
     def _watch_budgets(self) -> None:
         if self._budget_task is None or self._budget_task.done():

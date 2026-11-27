@@ -725,10 +725,9 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         st = await self.b.tool("spawn", module="echo", wait=True, budget_usd=0.05)
         r = json.loads(await self.ask(st["id"], 'BRIDGE spawn {"module": "peer", "wait": true}'))
         child = json.loads(r["content"][0]["text"])["id"]
-        # each key may spend at most what is left of the budget
+        # keys carry no gateway budget (LiteLLM would refuse calls early)
         gen = {b["key_alias"]: b for p, b, _ in self.gw.requests if p == "/key/generate"}
-        self.assertEqual(gen[f"agora-{st['id']}"]["max_budget"], 0.05)
-        self.assertLessEqual(gen[f"agora-{child}"]["max_budget"], 0.05)
+        self.assertNotIn("max_budget", gen[f"agora-{st['id']}"])
         m = self.b.broker.manager
         await m.check_budgets()  # 0.0123 x 2 is under the budget
         st2 = await self.b.tool("status", session=st["id"])
@@ -739,10 +738,6 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
             s = await self.b.tool("status", session=sid)
             self.assertEqual(s["state"], "terminated")
             self.assertTrue(s["end_reason"].startswith("budget reached: $0.0600 of $0.0500"))
-        # without a budget nothing is minted with a cap
-        free = await self.b.tool("spawn", module="echo", wait=True)
-        gen = {b["key_alias"]: b for p, b, _ in self.gw.requests if p == "/key/generate"}
-        self.assertNotIn("max_budget", gen[f"agora-{free['id']}"])
         code, body = await self.b.call("spawn", {"module": "echo", "budget_usd": 0})
         self.assertEqual(code, 400)
 
