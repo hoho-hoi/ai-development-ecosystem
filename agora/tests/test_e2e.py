@@ -726,6 +726,7 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec["all_versions"]["sessions"], 1)
         self.assertEqual(rec["all_versions"]["cost_usd"], {"median": 0.0123, "p90": 0.0123})
         self.assertEqual(rec["this_version"]["sessions"], 1)
+        self.assertEqual(rec["all_versions"]["busy_seconds"]["sessions"], 1)
         self.assertIsNone(cards["peer"]["cost_record"])
 
     async def test_a_budget_ends_the_session_and_everyone_it_started(self):

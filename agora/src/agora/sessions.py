@@ -46,6 +46,7 @@ import os
 import re
 import secrets
 import shutil
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -139,6 +140,8 @@ class Session:
     turns: int = 0
     cost_usd: float | None = None  # from the LLM gateway (refresh_cost)
     budget_usd: float | None = None  # for this session and its subtree together
+    busy_seconds: float = 0.0  # time spent in turns (busy), not waiting
+    busy_since: float | None = None
     tools: frozenset[str] | None = None  # tools this person may call; None = all
     # set whenever a message is put in this mailbox, and whenever someone this
     # person is waiting on (receive from=) goes quiet
@@ -166,6 +169,7 @@ class Session:
             "end_reason": self.end_reason,
             "meta": {**self.meta, "public_key": self.key.public_hex if self.key else None},
             "cost_usd": self.cost_usd,
+            "busy_seconds": round(self.busy_seconds, 1),
         }
 
 
@@ -282,6 +286,12 @@ class SessionManager:
 
     def _set_state(self, s: Session, state: str, **extra: Any) -> None:
         old, s.state = s.state, state
+        t = time.monotonic()
+        if old == "busy" and s.busy_since is not None:
+            s.busy_seconds += t - s.busy_since
+            s.busy_since = None
+        if state == "busy":
+            s.busy_since = t
         self.store.upsert_session(s.row())
         self.store.record("session.state", session_id=s.id, old=old, new=state, **extra)
         if state in ("idle", "failed", "terminated"):
@@ -1139,7 +1149,8 @@ class SessionManager:
         """What sessions of each module have cost, from the sessions that ended
         here: per module, for each version and for all versions together, the
         number of sessions and the median and 90th percentile of their cost
-        (USD, the session and every session it started) and time (seconds).
+        (USD, the session and every session it started) and of the session's
+        own time in turns (seconds; waiting is not counted).
         Sessions whose own cost is unknown (no gateway) are left out."""
         rows = [r for r in self.store.session_rows() if r["kind"] == "managed"]
         kids: dict[str, list[dict[str, Any]]] = {}
@@ -1156,10 +1167,11 @@ class SessionManager:
 
         def stats(rs: list[dict[str, Any]]) -> dict[str, Any]:
             costs = [tree_cost(r) for r in rs]
-            secs = [(datetime.fromisoformat(r["ended_at"]) - datetime.fromisoformat(r["created_at"])).total_seconds() for r in rs]
-            return {"sessions": len(rs),
-                    "cost_usd": {"median": round(pct(costs, 0.5), 4), "p90": round(pct(costs, 0.9), 4)},
-                    "seconds": {"median": round(pct(secs, 0.5)), "p90": round(pct(secs, 0.9))}}
+            out = {"sessions": len(rs), "cost_usd": {"median": round(pct(costs, 0.5), 4), "p90": round(pct(costs, 0.9), 4)}}
+            secs = [r["busy_seconds"] for r in rs if r["busy_seconds"] is not None]
+            if secs:  # time in turns (not waiting), of the sessions that recorded it
+                out["busy_seconds"] = {"sessions": len(secs), "median": round(pct(secs, 0.5)), "p90": round(pct(secs, 0.9))}
+            return out
 
         by_module: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
@@ -1190,6 +1202,7 @@ class SessionManager:
                 "last_text": s.last_text,
                 # USD, as the LLM gateway recorded it (None: no gateway at this place)
                 "cost_usd": s.cost_usd,
+                "busy_seconds": round(s.busy_seconds + (time.monotonic() - s.busy_since if s.busy_since else 0), 1),
                 # USD this session and its subtree may spend together, and have spent (None: no budget)
                 "budget_usd": s.budget_usd,
                 "subtree_cost_usd": round(self._subtree_cost(s), 6) if s.budget_usd is not None else None,

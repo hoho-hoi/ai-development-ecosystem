@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at TEXT,
     end_reason TEXT,
     meta TEXT NOT NULL DEFAULT '{}',
-    cost_usd REAL
+    cost_usd REAL,
+    busy_seconds REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sessions_token ON sessions(token_hash);
 
@@ -87,8 +88,9 @@ class StateStore:
             if col not in have:
                 self.db.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
         # v0.24: what each session cost (USD, from the LLM gateway), for list_modules' cost record
-        if "cost_usd" not in have:
-            self.db.execute("ALTER TABLE sessions ADD COLUMN cost_usd REAL")
+        for col in ("cost_usd", "busy_seconds"):
+            if col not in have:
+                self.db.execute(f"ALTER TABLE sessions ADD COLUMN {col} REAL")
 
     # --- redaction -------------------------------------------------------
     def add_secret(self, name: str, value: str) -> None:
