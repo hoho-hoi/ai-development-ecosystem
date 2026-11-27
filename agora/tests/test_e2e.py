@@ -720,6 +720,13 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
                       [(p, b) for p, b, _ in self.gw.requests])
         self.assertEqual((await self.b.tool("status", session=st["id"]))["cost_usd"], 0.0123)
+        # list_modules shows what the module's ended sessions cost
+        cards = {c["id"]: c for c in (await self.b.tool("list_modules"))["modules"]}
+        rec = cards["echo"]["cost_record"]
+        self.assertEqual(rec["all_versions"]["sessions"], 1)
+        self.assertEqual(rec["all_versions"]["cost_usd"], {"median": 0.0123, "p90": 0.0123})
+        self.assertEqual(rec["this_version"]["sessions"], 1)
+        self.assertIsNone(cards["peer"]["cost_record"])
 
     async def test_a_budget_ends_the_session_and_everyone_it_started(self):
         st = await self.b.tool("spawn", module="echo", wait=True, budget_usd=0.05)

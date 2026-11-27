@@ -39,6 +39,7 @@ Thoughts are open: anyone may read anyone's history, and wait for more.
 from __future__ import annotations
 
 import asyncio
+import math
 import hashlib
 import logging
 import os
@@ -164,6 +165,7 @@ class Session:
             "ended_at": self.ended_at,
             "end_reason": self.end_reason,
             "meta": {**self.meta, "public_key": self.key.public_hex if self.key else None},
+            "cost_usd": self.cost_usd,
         }
 
 
@@ -1132,6 +1134,44 @@ class SessionManager:
             for x in reversed(tree):  # the deepest first
                 if x.live:
                     await self._finalize(x, "terminated", reason)
+
+    def cost_record(self) -> dict[str, dict[str, Any]]:
+        """What sessions of each module have cost, from the sessions that ended
+        here: per module, for each version and for all versions together, the
+        number of sessions and the median and 90th percentile of their cost
+        (USD, the session and every session it started) and time (seconds).
+        Sessions whose own cost is unknown (no gateway) are left out."""
+        rows = [r for r in self.store.session_rows() if r["kind"] == "managed"]
+        kids: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            if r["parent_id"]:
+                kids.setdefault(r["parent_id"].split("@")[0], []).append(r)
+
+        def tree_cost(r: dict[str, Any]) -> float:
+            return (r["cost_usd"] or 0.0) + sum(tree_cost(k) for k in kids.get(r["id"], []))
+
+        def pct(xs: list[float], p: float) -> float:
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, max(0, math.ceil(p * len(xs)) - 1))]
+
+        def stats(rs: list[dict[str, Any]]) -> dict[str, Any]:
+            costs = [tree_cost(r) for r in rs]
+            secs = [(datetime.fromisoformat(r["ended_at"]) - datetime.fromisoformat(r["created_at"])).total_seconds() for r in rs]
+            return {"sessions": len(rs),
+                    "cost_usd": {"median": round(pct(costs, 0.5), 4), "p90": round(pct(costs, 0.9), 4)},
+                    "seconds": {"median": round(pct(secs, 0.5)), "p90": round(pct(secs, 0.9))}}
+
+        by_module: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            if r["module_id"] and r["ended_at"] and r["cost_usd"] is not None:
+                by_module.setdefault(r["module_id"], []).append(r)
+        out = {}
+        for mod, rs in by_module.items():
+            versions: dict[str, list[dict[str, Any]]] = {}
+            for r in rs:
+                versions.setdefault(r["module_version"] or "?", []).append(r)
+            out[mod] = {"all": stats(rs), "versions": {v: stats(x) for v, x in versions.items()}}
+        return out
 
     async def refresh_cost(self, s: Session) -> None:
         """Read the session's cost from the LLM gateway (its virtual key)."""

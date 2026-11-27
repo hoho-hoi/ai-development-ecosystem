@@ -185,6 +185,10 @@ class Broker:
             return {**m.summary(caller), "public_key": caller.key.public_hex if caller.key else None}
         if tool == "list_modules":
             cards, errors = await asyncio.to_thread(self.catalog.cards)
+            record = await asyncio.to_thread(m.cost_record)
+            for c in cards:  # what sessions of this module have cost here (None: none ended yet)
+                r = record.get(c.get("id") or "")
+                c["cost_record"] = {"this_version": r["versions"].get(c.get("version")), "all_versions": r["all"]} if r else None
             return {
                 "place": m.place,
                 "places": sorted(self.federation.peers),  # where else modules can be listed and spawned
