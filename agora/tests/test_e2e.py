@@ -633,6 +633,7 @@ class FakeGateway:
         import threading
 
         self.requests: list[tuple[str, dict, str]] = []
+        self.spend = 0.0123  # what every key has cost so far
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -649,7 +650,7 @@ class FakeGateway:
 
             def do_GET(self):
                 outer.requests.append((self.path, {}, self.headers.get("Authorization", "")))
-                data = json.dumps({"key": "x", "info": {"spend": 0.0123}}).encode()
+                data = json.dumps({"key": "x", "info": {"spend": outer.spend}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -719,6 +720,31 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("/key/delete", {"keys": [f"sk-virtual-agora-{st['id']}"]}),
                       [(p, b) for p, b, _ in self.gw.requests])
         self.assertEqual((await self.b.tool("status", session=st["id"]))["cost_usd"], 0.0123)
+
+    async def test_a_budget_ends_the_session_and_everyone_it_started(self):
+        st = await self.b.tool("spawn", module="echo", wait=True, budget_usd=0.05)
+        r = json.loads(await self.ask(st["id"], 'BRIDGE spawn {"module": "peer", "wait": true}'))
+        child = json.loads(r["content"][0]["text"])["id"]
+        # each key may spend at most what is left of the budget
+        gen = {b["key_alias"]: b for p, b, _ in self.gw.requests if p == "/key/generate"}
+        self.assertEqual(gen[f"agora-{st['id']}"]["max_budget"], 0.05)
+        self.assertLessEqual(gen[f"agora-{child}"]["max_budget"], 0.05)
+        m = self.b.broker.manager
+        await m.check_budgets()  # 0.0123 x 2 is under the budget
+        st2 = await self.b.tool("status", session=st["id"])
+        self.assertEqual((st2["state"] in ("idle", "busy"), st2["budget_usd"], st2["subtree_cost_usd"]), (True, 0.05, 0.0246))
+        self.gw.spend = 0.03  # now 0.06 together
+        await m.check_budgets()
+        for sid in (st["id"], child):
+            s = await self.b.tool("status", session=sid)
+            self.assertEqual(s["state"], "terminated")
+            self.assertTrue(s["end_reason"].startswith("budget reached: $0.0600 of $0.0500"))
+        # without a budget nothing is minted with a cap
+        free = await self.b.tool("spawn", module="echo", wait=True)
+        gen = {b["key_alias"]: b for p, b, _ in self.gw.requests if p == "/key/generate"}
+        self.assertNotIn("max_budget", gen[f"agora-{free['id']}"])
+        code, body = await self.b.call("spawn", {"module": "echo", "budget_usd": 0})
+        self.assertEqual(code, 400)
 
     async def test_each_turn_is_a_trace_of_its_session(self):
         st = await self.b.tool("spawn", module="echo", wait=True)

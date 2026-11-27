@@ -137,6 +137,7 @@ class Session:
     last_text: str | None = None  # what the agent wrote in its last turn (delivered to no one)
     turns: int = 0
     cost_usd: float | None = None  # from the LLM gateway (refresh_cost)
+    budget_usd: float | None = None  # for this session and its subtree together
     tools: frozenset[str] | None = None  # tools this person may call; None = all
     # set whenever a message is put in this mailbox, and whenever someone this
     # person is waiting on (receive from=) goes quiet
@@ -216,6 +217,8 @@ class SessionManager:
         self._lock = asyncio.Lock()
         self.modules = ModuleCache(cfg.state_dir / "modules")
         self._state_changed = asyncio.Event()  # replaced on every state change
+        self._budget_task: asyncio.Task[None] | None = None
+        self.budget_poll_seconds = 10.0
         # The operator signs with the place's own key: the place vouches for it.
         self.operator = self._add(
             Session(
@@ -410,7 +413,14 @@ class SessionManager:
         if len(same) >= spec.limits.max_concurrent:
             raise Forbidden(f"spec {spec.id!r} limit reached: {spec.limits.max_concurrent} live sessions")
 
-    async def _born(self, caller: Session, spec: Spec, name: str | None, meta: dict[str, Any]) -> Session:
+    async def _born(
+        self, caller: Session, spec: Spec, name: str | None, meta: dict[str, Any], budget_usd: float | None = None
+    ) -> Session:
+        budget = budget_usd if budget_usd is not None else spec.limits.max_budget_usd
+        if budget is not None and not self.gateway:
+            if budget_usd is not None:
+                raise BrokerError("budget_usd needs an LLM gateway at this place (costs are read from it)")
+            budget = None  # the module's default cannot be measured here
         async with self._lock:
             self._check_spawn_policy(caller, spec)
             self._check_capacity(spec)
@@ -426,6 +436,7 @@ class SessionManager:
                     spec=spec,
                     meta=meta,
                     tools=frozenset(spec.runtime.broker_tools),
+                    budget_usd=budget,
                 )
             )
 
@@ -449,7 +460,15 @@ class SessionManager:
         module_ref: str | None = None,
         module_path: str | None = None,
         module_workspace_path: str | None = None,
+        budget_usd: float | None = None,
     ) -> dict[str, Any]:
+        if budget_usd is not None:
+            try:
+                budget_usd = float(budget_usd)
+            except (TypeError, ValueError):
+                raise BrokerError("budget_usd must be a number") from None
+            if not budget_usd > 0:
+                raise BrokerError("budget_usd must be more than 0")
         if module_workspace_path and (module or module_ref or module_path or (place and place != self.place)):
             raise BrokerError("module_workspace_path names the module by itself: no module, module_ref, "
                               "module_path or place with it")
@@ -458,7 +477,8 @@ class SessionManager:
         if place and place != self.place:
             # Born elsewhere; the task is then an ordinary signed message from the caller.
             args = {"module": module, "workspace": workspace, "name": name, "wait": wait,
-                    "wait_timeout": wait_timeout, "module_ref": module_ref, "module_path": module_path}
+                    "wait_timeout": wait_timeout, "module_ref": module_ref, "module_path": module_path,
+                    "budget_usd": budget_usd}
             st = await self.forward(caller, place, "spawn", {k: v for k, v in args.items() if v is not None},
                                     timeout=wait_timeout + 60)
             task_message_id = None
@@ -479,7 +499,7 @@ class SessionManager:
             raise NotFound(str(e)) from None
         except ValueError as e:  # SpecError, ModuleError
             raise BrokerError(str(e)) from None
-        s = await self._born(caller, spec, name, {"ref": ws.ref})
+        s = await self._born(caller, spec, name, {"ref": ws.ref}, budget_usd)
         self.store.record(
             "session.spawn",
             session_id=s.id,
@@ -490,11 +510,13 @@ class SessionManager:
             module_ref_override=module_ref,
             module_path_override=module_path,
             module_workspace_path=module_workspace_path,
+            budget_usd=s.budget_usd,
             runner=self.runner.name,
             public_key=s.key.public_hex if s.key else None,
         )
         self._trace_start(s, caller)
         s.tasks.append(asyncio.create_task(self._launch(s)))
+        self._watch_budgets()
         task_message_id = None
         if task:
             task_message_id = (await self.send(caller, s.id, task))["message_id"]
@@ -628,7 +650,8 @@ class SessionManager:
                 url_var, key_var = HARNESS_ENV[spec.runtime.harness]
                 meta = {"agora_session": self.address(s), "module": spec.id, "module_version": spec.version,
                         "fingerprint": spec.fingerprint, "place": self.place}
-                s.llm_key = await asyncio.to_thread(self.gateway.mint, s.id, meta)
+                cap = self._key_cap(s)
+                s.llm_key = await asyncio.to_thread(self.gateway.mint, s.id, meta, cap)
                 self.store.add_secret("llm_key", s.llm_key)
                 env[url_var] = self.gateway.session_url
                 extra_secrets[key_var] = s.llm_key
@@ -1063,6 +1086,75 @@ class SessionManager:
             out.append(self.summary(s))
         return out
 
+    # --- budgets --------------------------------------------------------------
+    def _children(self, s: Session) -> list[Session]:
+        addr = self.address(s)
+        return [c for c in self.sessions.values() if c.kind == "managed" and c.parent_id == addr]
+
+    def _subtree(self, s: Session) -> list[Session]:
+        """s and everyone it started, and everyone they started (s first)."""
+        out, todo = [], [s]
+        while todo:
+            x = todo.pop()
+            out.append(x)
+            todo.extend(self._children(x))
+        return out
+
+    def _subtree_cost(self, s: Session) -> float:
+        return sum(x.cost_usd or 0.0 for x in self._subtree(s))
+
+    def _budgeted_line(self, s: Session) -> list[Session]:
+        """s and its ancestors here that have a budget."""
+        out, x = [], s
+        while x is not None:
+            if x.budget_usd is not None:
+                out.append(x)
+            if not x.parent_id:
+                break
+            ref, place = split_address(x.parent_id)
+            x = self.sessions.get(ref) if place in (None, self.place) else None
+            if x is not None and x.kind != "managed":
+                break
+        return out
+
+    def _key_cap(self, s: Session) -> float | None:
+        """The most a new key may spend: what is left of the tightest budget
+        above (or of) s. The gateway refuses calls past it, so one session
+        cannot overrun between two budget checks."""
+        left = [b.budget_usd - self._subtree_cost(b) for b in self._budgeted_line(s)]  # type: ignore[operator]
+        return max(0.0, min(left)) if left else None
+
+    def _watch_budgets(self) -> None:
+        if self._budget_task is None or self._budget_task.done():
+            self._budget_task = asyncio.create_task(self._budget_loop())
+
+    async def _budget_loop(self) -> None:
+        while True:
+            budgeted = [s for s in self.sessions.values() if s.kind == "managed" and s.live and s.budget_usd is not None]
+            if not budgeted:
+                return
+            await asyncio.sleep(self.budget_poll_seconds)
+            try:
+                await self.check_budgets()
+            except Exception:
+                log.exception("budget check failed")
+
+    async def check_budgets(self) -> None:
+        """Terminate every subtree whose spend has reached its budget."""
+        for s in [s for s in self.sessions.values() if s.kind == "managed" and s.live and s.budget_usd is not None]:
+            if not s.live:  # ended by an earlier subtree in this round
+                continue
+            tree = self._subtree(s)
+            await asyncio.gather(*(self.refresh_cost(x) for x in tree if x.live))
+            spent = self._subtree_cost(s)
+            if spent < s.budget_usd:  # type: ignore[operator]
+                continue
+            reason = f"budget reached: ${spent:.4f} of ${s.budget_usd:.4f} (this session and the sessions it started)"
+            self.store.record("session.limit", session_id=s.id, limit="budget_usd", budget_usd=s.budget_usd, spent_usd=spent)
+            for x in reversed(tree):  # the deepest first
+                if x.live:
+                    await self._finalize(x, "terminated", reason)
+
     async def refresh_cost(self, s: Session) -> None:
         """Read the session's cost from the LLM gateway (its virtual key)."""
         if not (s.llm_key and self.gateway):
@@ -1080,6 +1172,9 @@ class SessionManager:
                 "last_text": s.last_text,
                 # USD, as the LLM gateway recorded it (None: no gateway at this place)
                 "cost_usd": s.cost_usd,
+                # USD this session and its subtree may spend together, and have spent (None: no budget)
+                "budget_usd": s.budget_usd,
+                "subtree_cost_usd": round(self._subtree_cost(s), 6) if s.budget_usd is not None else None,
                 "unread": len(self.store.unread(s.id)),
                 "acp_session_id": s.acp_session_id,
                 "fingerprint": s.spec.fingerprint if s.spec else None,

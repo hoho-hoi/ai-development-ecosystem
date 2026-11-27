@@ -89,6 +89,9 @@ class ModuleLimits(_Closed):
     max_runtime_minutes: int = Field(default=60, alias="maxRuntimeMinutes", ge=1)
     max_spawn_depth: int = Field(default=10, alias="maxSpawnDepth", ge=0)
     max_concurrent: int = Field(default=20, alias="maxConcurrent", ge=1)
+    # USD for a session and every session it starts (its subtree), as the LLM
+    # gateway records it; None: no budget unless the caller gives one
+    max_budget_usd: float | None = Field(default=None, alias="maxBudgetUsd", gt=0)
 
 
 class AgoraExtension(_Closed):

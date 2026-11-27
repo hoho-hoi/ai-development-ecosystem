@@ -53,7 +53,7 @@ TOOLS: dict[str, tuple[set[str], set[str]]] = {
     "whoami": (set(), set()),
     "list_modules": ({"place"}, set()),
     "spawn": ({"module", "task", "workspace", "module_ref", "module_path", "module_workspace_path", "name", "wait",
-               "wait_timeout", "place"}, set()),
+               "wait_timeout", "place", "budget_usd"}, set()),
     "clone": ({"session", "name", "wait", "wait_timeout"}, {"session"}),
     "send": ({"to", "body", "thread_id", "reply_to"}, {"body"}),
     "receive": ({"from", "reply_to", "wait"}, set()),
@@ -203,6 +203,7 @@ class Broker:
                 module_ref=args.get("module_ref"),
                 module_path=args.get("module_path"),
                 module_workspace_path=args.get("module_workspace_path"),
+                budget_usd=args.get("budget_usd"),
             )
         if tool == "clone":
             target = caller.id if args["session"] == "self" else args["session"]

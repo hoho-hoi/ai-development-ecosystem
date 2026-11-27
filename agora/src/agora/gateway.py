@@ -52,8 +52,13 @@ class Gateway:
         except Exception as e:  # HTTPError, URLError, bad JSON
             raise GatewayError(f"gateway {path} failed: {e}") from None
 
-    def mint(self, session_id: str, metadata: dict[str, Any]) -> str:
-        res = self._post("/key/generate", {"key_alias": f"agora-{session_id}", "metadata": metadata})
+    def mint(self, session_id: str, metadata: dict[str, Any], max_budget: float | None = None) -> str:
+        """A virtual key for one session. With max_budget (USD), the gateway
+        refuses the key's calls once its spend reaches it."""
+        body: dict[str, Any] = {"key_alias": f"agora-{session_id}", "metadata": metadata}
+        if max_budget is not None:
+            body["max_budget"] = max_budget
+        res = self._post("/key/generate", body)
         key = res.get("key")
         if not key:
             raise GatewayError("gateway returned no key")

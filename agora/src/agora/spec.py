@@ -155,6 +155,7 @@ class Limits:
     max_runtime_minutes: int
     max_spawn_depth: int
     max_concurrent: int
+    max_budget_usd: float | None = None
     memory: str | None = None
     cpus: float | None = None
     pids: int = 512
@@ -288,7 +289,7 @@ def resolve(
         module=mod,
         source=source,
         runtime=runtime,
-        limits=Limits(lim.max_runtime_minutes, lim.max_spawn_depth, lim.max_concurrent),
+        limits=Limits(lim.max_runtime_minutes, lim.max_spawn_depth, lim.max_concurrent, lim.max_budget_usd),
         spawnable_by=list(ext.spawnable_by),
         network=network or Network(),
         workspace=workspace or Workspace(),
