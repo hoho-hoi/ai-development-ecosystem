@@ -53,8 +53,6 @@ class Gateway:
             raise GatewayError(f"gateway {path} failed: {e}") from None
 
     def mint(self, session_id: str, metadata: dict[str, Any]) -> str:
-        # No max_budget on the key: LiteLLM reserves each call's worst-case
-        # cost against it, and refuses calls long before the budget is spent.
         res = self._post("/key/generate", {"key_alias": f"agora-{session_id}", "metadata": metadata})
         key = res.get("key")
         if not key:

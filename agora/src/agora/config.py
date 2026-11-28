@@ -112,7 +112,7 @@ class BrokerConfig(BaseModel):
     # Global caps.
     max_sessions: int = 20
     max_spawn_depth: int = 10
-    keep_bundles: bool = False
+    keep_bundles: bool = True  # an ended session's files stay, for looking back
     # The broker's own Codex login (a CODEX_HOME holding auth.json), used by
     # runtimes with login: chatgpt. Default: <state_dir>/codex-login.
     codex_login_dir: Path | None = None

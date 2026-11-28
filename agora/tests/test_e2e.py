@@ -113,7 +113,8 @@ class LifecycleTests(BrokerCase):
         done = await self.b.tool("terminate", session=sid, reason="test over")
         self.assertEqual(done["state"], "terminated")
         self.assertFalse((self.b.cfg.history_dir / "sessions" / sid / "harness").exists())  # no records of its own
-        self.assertFalse((self.b.cfg.state_dir / "bundles" / sid).exists(), "bundle not removed")
+        # its files stay for looking back (keep_bundles defaults to true)
+        self.assertTrue((self.b.cfg.state_dir / "bundles" / sid / "workspace").exists(), "bundle removed")
         listed = (await self.b.tool("list_sessions"))["sessions"]
         self.assertNotIn(sid, [s["id"] for s in listed])
 
@@ -728,26 +729,6 @@ class GatewayAndTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec["this_version"]["sessions"], 1)
         self.assertEqual(rec["all_versions"]["busy_seconds"]["sessions"], 1)
         self.assertIsNone(cards["peer"]["cost_record"])
-
-    async def test_a_budget_ends_the_session_and_everyone_it_started(self):
-        st = await self.b.tool("spawn", module="echo", wait=True, budget_usd=0.05)
-        r = json.loads(await self.ask(st["id"], 'BRIDGE spawn {"module": "peer", "wait": true}'))
-        child = json.loads(r["content"][0]["text"])["id"]
-        # keys carry no gateway budget (LiteLLM would refuse calls early)
-        gen = {b["key_alias"]: b for p, b, _ in self.gw.requests if p == "/key/generate"}
-        self.assertNotIn("max_budget", gen[f"agora-{st['id']}"])
-        m = self.b.broker.manager
-        await m.check_budgets()  # 0.0123 x 2 is under the budget
-        st2 = await self.b.tool("status", session=st["id"])
-        self.assertEqual((st2["state"] in ("idle", "busy"), st2["budget_usd"], st2["subtree_cost_usd"]), (True, 0.05, 0.0246))
-        self.gw.spend = 0.03  # now 0.06 together
-        await m.check_budgets()
-        for sid in (st["id"], child):
-            s = await self.b.tool("status", session=sid)
-            self.assertEqual(s["state"], "terminated")
-            self.assertTrue(s["end_reason"].startswith("budget reached: $0.0600 of $0.0500"))
-        code, body = await self.b.call("spawn", {"module": "echo", "budget_usd": 0})
-        self.assertEqual(code, 400)
 
     async def test_each_turn_is_a_trace_of_its_session(self):
         st = await self.b.tool("spawn", module="echo", wait=True)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -21,6 +22,8 @@ from pathlib import Path
 
 from ..spec import HARNESSES, MODULE_DOCKERFILE, Spec
 from . import STREAM_LIMIT, RunHandle, Runner
+
+log = logging.getLogger(__name__)
 
 # The agora project directory: images/<harness>/Dockerfile and src/ (build context).
 IMAGES_ROOT = Path(__file__).resolve().parents[3]
@@ -314,6 +317,18 @@ class DockerRunner(Runner):
         return f"{d}/{name}"
 
     async def destroy(self, handle: RunHandle) -> None:
+        bundle = Path(handle.info["bundle"])
+        if self.keep_bundles:
+            # the work lives in the container: copy its workspace back over the
+            # bundle's starting copy before the container goes, for looking back
+            tmp = bundle / "workspace.final"
+            shutil.rmtree(tmp, ignore_errors=True)
+            code, _, err = await _run(self.docker, "cp", f"{handle.info['container']}:{CONTAINER_WORKSPACE}", str(tmp), check=False)
+            if code == 0:
+                shutil.rmtree(bundle / "workspace", ignore_errors=True)
+                tmp.rename(bundle / "workspace")
+            else:
+                log.warning("could not keep the workspace of %s: %s", handle.info["container"], err)
         await _run(self.docker, "rm", "-f", handle.info["container"], check=False)
         if not self.keep_bundles:
-            shutil.rmtree(handle.info["bundle"], ignore_errors=True)
+            shutil.rmtree(bundle, ignore_errors=True)

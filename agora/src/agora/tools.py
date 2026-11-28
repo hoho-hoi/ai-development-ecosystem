@@ -70,7 +70,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "wait": {"type": "boolean", "description": "Wait until the session is ready (default true)"},
                 "wait_timeout": {"type": "number", "description": "Seconds to wait (default 600)"},
                 "place": {**S, "description": "Place to start it at (default: here)"},
-                "budget_usd": {"type": "number", "description": "USD the new session and every session it starts may spend together (default: the module's maxBudgetUsd, if any). When reached, they are all terminated"},
             },
         },
     },

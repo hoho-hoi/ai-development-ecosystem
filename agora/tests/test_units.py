@@ -692,6 +692,32 @@ fi
             asyncio.run(runner.ensure_image(spec))  # built once
             self.assertEqual(len([x for x in log.read_text().splitlines() if x.startswith("build")]), 2)
 
+    def test_an_ended_container_leaves_its_final_workspace(self):
+        from agora.runner import RunHandle
+        from agora.runner.docker import DockerRunner
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            log = t / "docker.log"
+            docker = t / "docker"
+            # `docker cp c:/workspace DEST` writes what the session made
+            docker.write_text(f"""#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = cp ]; then mkdir -p "$3" && echo made > "$3/result.txt"; fi
+""")
+            docker.chmod(0o755)
+            bundle = t / "bundle"
+            (bundle / "workspace").mkdir(parents=True)
+            (bundle / "workspace" / "start.txt").write_text("start")
+            handle = RunHandle(process=None, workspace_path="/workspace", agora_path="/a", broker_url="http://b", info={"container": "agora-s-1", "bundle": str(bundle)})
+            asyncio.run(DockerRunner("http://b", docker=str(docker), keep_bundles=True).destroy(handle))
+            self.assertEqual((bundle / "workspace" / "result.txt").read_text().strip(), "made")
+            self.assertFalse((bundle / "workspace" / "start.txt").exists())
+            calls = log.read_text().splitlines()
+            self.assertTrue(calls[0].startswith("cp agora-s-1:/workspace"))
+            self.assertEqual(calls[1], "rm -f agora-s-1")
+            asyncio.run(DockerRunner("http://b", docker=str(docker), keep_bundles=False).destroy(handle))
+            self.assertFalse(bundle.exists())
+
     def test_local_runner_refuses_a_module_dockerfile(self):
         from agora.runner.local import LocalRunner
         with tempfile.TemporaryDirectory() as t:
